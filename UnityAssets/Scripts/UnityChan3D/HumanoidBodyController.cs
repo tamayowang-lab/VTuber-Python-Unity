@@ -19,8 +19,16 @@ public class HumanoidBodyController : MonoBehaviour
     public bool invertDepth = true;
     [Min(1)] public float maximumAngularSpeed = 240f;
     [Range(0, 5)] public float rotationDeadZone = 1f;
-    [Min(0)] public float occlusionGracePeriod = 0.2f;
+    [Min(0)] public float occlusionGracePeriod = 0.4f;
+    public bool returnToRestWhenLost = true;
     public float trackingTimeout = 0.5f;
+    [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
+    public bool requireHandForArmTracking = true;
+    [Range(0, 80)] public float maximumTorsoAngle = 40f;
+    [Tooltip("With hips out of view, estimate torso turn/side tilt from shoulders only; forward lean needs hips.")]
+    public bool allowShoulderOnlyTorso = true;
+    [SerializeField] bool torsoTracking;
+    public bool TorsoTracking { get { return torsoTracking; } }
 
     [Serializable] public class Point
     {
@@ -34,7 +42,7 @@ public class HumanoidBodyController : MonoBehaviour
     class Bone
     {
         public Transform transform;
-        public Quaternion restLocal, restRotation, filteredRotation;
+        public Quaternion restLocal, restRotation, filteredLocal, avatarToParent;
         public Vector3 restDirection;
         public float lastTracked = float.NegativeInfinity;
     }
@@ -53,6 +61,9 @@ public class HumanoidBodyController : MonoBehaviour
     Quaternion restTorsoFrame;
     readonly Dictionary<bool, Quaternion> restPalmFrames = new Dictionary<bool, Quaternion>();
     Animator animator;
+    Transform hipTransform;
+    Vector3 hipRestPosition;
+    readonly List<HumanBodyBones> torsoBones = new List<HumanBodyBones>();
 
     void Start()
     {
@@ -64,7 +75,21 @@ public class HumanoidBodyController : MonoBehaviour
             return;
         }
         Add(HumanBodyBones.Hips, HumanBodyBones.Spine);
-        Add(HumanBodyBones.Spine, HumanBodyBones.Chest);
+        // Chest and UpperChest are optional Humanoid mappings. Always drive
+        // the mapped spine, even when the avatar has no mapped Chest.
+        HumanBodyBones[] chain = { HumanBodyBones.Spine, HumanBodyBones.Chest,
+            HumanBodyBones.UpperChest, HumanBodyBones.Neck };
+        for (int i = 0; i < chain.Length - 1; i++)
+        {
+            if (animator.GetBoneTransform(chain[i]) == null) continue;
+            for (int j = i + 1; j < chain.Length; j++)
+                if (animator.GetBoneTransform(chain[j]) != null)
+                {
+                    Add(chain[i], chain[j]);
+                    if (bones.ContainsKey(chain[i])) torsoBones.Add(chain[i]);
+                    break;
+                }
+        }
         AddArm(true);
         AddArm(false);
         Transform left = animator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
@@ -77,6 +102,10 @@ public class HumanoidBodyController : MonoBehaviour
             enabled = false;
             return;
         }
+        hipTransform = hips;
+        hipRestPosition = hips.localPosition;
+        if (torsoBones.Count == 0)
+            Debug.LogWarning("No usable Humanoid spine mapping; check Configure Avatar.", this);
         restTorsoFrame = Frame(transform.InverseTransformDirection(right.position - left.position),
                                transform.InverseTransformDirection(neck.position - hips.position));
         try
@@ -102,7 +131,8 @@ public class HumanoidBodyController : MonoBehaviour
         if (direction.sqrMagnitude < 1e-10f) return;
         bones[id] = new Bone { transform = bone, restLocal = bone.localRotation,
             restRotation = Quaternion.Inverse(transform.rotation) * bone.rotation,
-            filteredRotation = Quaternion.Inverse(transform.rotation) * bone.rotation,
+            filteredLocal = bone.localRotation,
+            avatarToParent = Quaternion.Inverse(bone.parent.rotation) * transform.rotation,
             restDirection = direction.normalized };
     }
 
@@ -144,7 +174,8 @@ public class HumanoidBodyController : MonoBehaviour
             if (tip != null && bones.TryGetValue(fingers[i + 1], out previous))
                 bones[fingers[i + 2]] = new Bone { transform = tip, restLocal = tip.localRotation,
                     restRotation = Quaternion.Inverse(transform.rotation) * tip.rotation,
-                    filteredRotation = Quaternion.Inverse(transform.rotation) * tip.rotation,
+                    filteredLocal = tip.localRotation,
+                    avatarToParent = Quaternion.Inverse(tip.parent.rotation) * transform.rotation,
                     restDirection = previous.restDirection };
         }
     }
@@ -219,7 +250,6 @@ public class HumanoidBodyController : MonoBehaviour
         return new Vector3(point.x, point.y, invertDepth ? -point.z : point.z);
     }
 
-    float Blend { get { return 1f - Mathf.Exp(-Mathf.Max(0, smoothing) * Time.deltaTime); } }
     void Aim(HumanBodyBones id, Vector3 direction)
     {
         Bone bone;
@@ -228,31 +258,74 @@ public class HumanoidBodyController : MonoBehaviour
     }
     void Rotate(Bone bone, Quaternion target)
     {
-        // Ignore small landmark noise and cap sudden monocular depth flips.
-        if (Quaternion.Angle(bone.filteredRotation, target) > rotationDeadZone)
-        {
-            Quaternion smooth = Quaternion.Slerp(bone.filteredRotation, target, Blend);
-            bone.filteredRotation = Quaternion.RotateTowards(bone.filteredRotation, smooth,
-                Mathf.Max(1, maximumAngularSpeed) * Time.deltaTime);
-        }
+        Quaternion localTarget = Quaternion.Inverse(bone.transform.parent.rotation)
+            * transform.rotation * target;
+        ApplyLocal(bone, localTarget, Time.deltaTime, true);
         bone.lastTracked = Time.time;
-        bone.transform.rotation = transform.rotation * bone.filteredRotation;
     }
+
+    // Filter our OWN local pose, never the Animator's newly-written pose.
+    // This lets a held arm follow its parent torso without snapping or drifting.
+    void ApplyLocal(Bone bone, Quaternion target, float deltaTime, bool deadZone)
+    {
+        if (!deadZone || Quaternion.Angle(bone.filteredLocal, target) > rotationDeadZone)
+        {
+            float blend = 1f - Mathf.Exp(-Mathf.Max(0, smoothing) * deltaTime);
+            Quaternion smooth = Quaternion.Slerp(bone.filteredLocal, target, blend);
+            bone.filteredLocal = Quaternion.RotateTowards(bone.filteredLocal, smooth,
+                Mathf.Max(1, maximumAngularSpeed) * deltaTime);
+        }
+        bone.transform.localRotation = bone.filteredLocal;
+    }
+
     void HoldOrResetBone(HumanBodyBones id)
     {
         Bone bone;
         if (!bones.TryGetValue(id, out bone)) return;
-        if (Time.time - bone.lastTracked <= occlusionGracePeriod)
-            bone.transform.rotation = transform.rotation * bone.filteredRotation;
+        if (!returnToRestWhenLost || Time.time - bone.lastTracked <= occlusionGracePeriod)
+            bone.transform.localRotation = bone.filteredLocal;
         else ResetBone(id);
     }
     void ResetBone(HumanBodyBones id)
     {
         Bone bone;
         if (bones.TryGetValue(id, out bone))
+            ApplyLocal(bone, bone.restLocal, Time.deltaTime, false);
+    }
+
+    void ApplyTorso(Point[] p, float deltaTime)
+    {
+        bool hipsVisible = Visible(p, 11, 12, 23, 24);
+        torsoTracking = Visible(p, 11, 12) && (hipsVisible || allowShoulderOnlyTorso);
+        if (!torsoTracking)
         {
-            bone.transform.localRotation = Quaternion.Slerp(bone.transform.localRotation, bone.restLocal, Blend);
-            bone.filteredRotation = Quaternion.Inverse(transform.rotation) * bone.transform.rotation;
+            foreach (HumanBodyBones id in torsoBones) HoldOrResetBone(id);
+            return;
+        }
+        Vector3 right = TrackingPosition(p[12]) - TrackingPosition(p[11]);
+        Vector3 up = hipsVisible
+            ? (TrackingPosition(p[11]) + TrackingPosition(p[12])
+                - TrackingPosition(p[23]) - TrackingPosition(p[24])) * 0.5f
+            : Vector3.ProjectOnPlane(Vector3.up, right.normalized);
+        if (Vector3.Cross(right, up).sqrMagnitude < 1e-10f)
+        {
+            torsoTracking = false;
+            foreach (HumanBodyBones id in torsoBones) HoldOrResetBone(id);
+            return;
+        }
+        Quaternion delta = Frame(right, up) * Quaternion.Inverse(restTorsoFrame);
+        delta = Quaternion.RotateTowards(Quaternion.identity, delta, maximumTorsoAngle);
+        // Distribute lean/twist over the available spine chain. Do not rotate
+        // or translate the pelvis: the lower body remains anchored.
+        float weight = 1f / Mathf.Max(1, torsoBones.Count);
+        foreach (HumanBodyBones id in torsoBones)
+        {
+            Bone bone = bones[id];
+            Quaternion portion = Quaternion.Slerp(Quaternion.identity, delta, weight);
+            Quaternion target = bone.avatarToParent * portion
+                * Quaternion.Inverse(bone.avatarToParent) * bone.restLocal;
+            ApplyLocal(bone, target, deltaTime, true);
+            bone.lastTracked = Time.time;
         }
     }
 
@@ -268,6 +341,7 @@ public class HumanoidBodyController : MonoBehaviour
         if (current == null || Time.time - lastPacket > trackingTimeout)
         {
             trackingActive = false;
+            torsoTracking = false;
             return;
         }
         if (!trackingActive)
@@ -275,29 +349,18 @@ public class HumanoidBodyController : MonoBehaviour
             // Start/reconnect from the actual animated pose, not an old target.
             foreach (Bone bone in bones.Values)
             {
-                bone.filteredRotation = Quaternion.Inverse(transform.rotation) * bone.transform.rotation;
+                bone.filteredLocal = bone.transform.localRotation;
                 bone.lastTracked = float.NegativeInfinity;
             }
             trackingActive = true;
         }
+        // Pin only while this component owns a live tracking session.
+        hipTransform.localPosition = hipRestPosition;
+        Bone hips;
+        if (bones.TryGetValue(HumanBodyBones.Hips, out hips))
+            ApplyLocal(hips, hips.restLocal, Time.deltaTime, false);
         Point[] p = current.pose;
-        if (Visible(p, 11, 12, 23, 24))
-        {
-            Vector3 right = TrackingPosition(p[24]) - TrackingPosition(p[23]);
-            Vector3 up = (TrackingPosition(p[11]) + TrackingPosition(p[12]) - TrackingPosition(p[23]) - TrackingPosition(p[24])) * 0.5f;
-            if (Vector3.Cross(right, up).sqrMagnitude > 1e-10f)
-            {
-                Bone hips;
-                if (bones.TryGetValue(HumanBodyBones.Hips, out hips))
-                    Rotate(hips, Frame(right, up) * Quaternion.Inverse(restTorsoFrame) * hips.restRotation);
-            }
-            Vector3 shoulderRight = TrackingPosition(p[12]) - TrackingPosition(p[11]);
-            Bone spine;
-            if (Vector3.Cross(shoulderRight, up).sqrMagnitude > 1e-10f
-                && bones.TryGetValue(HumanBodyBones.Spine, out spine))
-                Rotate(spine, Frame(shoulderRight, up) * Quaternion.Inverse(restTorsoFrame) * spine.restRotation);
-        }
-        else { ResetBone(HumanBodyBones.Hips); ResetBone(HumanBodyBones.Spine); }
+        ApplyTorso(p, Time.deltaTime);
         ApplyArm(true, p, current.leftHand);
         ApplyArm(false, p, current.rightHand);
     }
@@ -309,11 +372,14 @@ public class HumanoidBodyController : MonoBehaviour
         HumanBodyBones lower = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         HumanBodyBones palm = left ? HumanBodyBones.LeftHand : HumanBodyBones.RightHand;
         HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
-        if (Visible(p, shoulder, elbow)) Aim(upper, TrackingPosition(p[elbow]) - TrackingPosition(p[shoulder]));
+        bool handPresent = hand != null && hand.Length == 21;
+        bool armReliable = (!requireHandForArmTracking || handPresent)
+            && Visible(p, shoulder, elbow, wrist);
+        if (armReliable) Aim(upper, TrackingPosition(p[elbow]) - TrackingPosition(p[shoulder]));
         else HoldOrResetBone(upper);
-        if (Visible(p, elbow, wrist)) Aim(lower, TrackingPosition(p[wrist]) - TrackingPosition(p[elbow]));
+        if (armReliable) Aim(lower, TrackingPosition(p[wrist]) - TrackingPosition(p[elbow]));
         else HoldOrResetBone(lower);
-        if (hand == null || hand.Length != 21)
+        if (!handPresent || !armReliable)
         {
             HoldOrResetBone(palm);
             foreach (HumanBodyBones id in fingers) HoldOrResetBone(id);

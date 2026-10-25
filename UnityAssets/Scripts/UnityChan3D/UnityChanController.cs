@@ -9,6 +9,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
+[DefaultExecutionOrder(200)]
 public class UnityChanController : MonoBehaviour, ISaveable
 {
     private Animator anim;
@@ -19,6 +20,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     public float max_rotation_angle = 45.0f;
     public bool invertPitch = true;
+    public bool compensateTorsoMotion = true;
 
     public float ear_max_threshold = 0.38f;
     public float ear_min_threshold = 0.30f;
@@ -42,6 +44,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private Transform neck;
     private Quaternion neckRestLocalRotation;
     private Quaternion avatarToNeckParent;
+    private Quaternion neckRestAvatarRotation;
+    private volatile bool hasFaceData;
 
     // TCP stuff
     Thread receiveThread;
@@ -62,6 +66,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
         neck = anim.GetBoneTransform(HumanBodyBones.Neck);
         // Preserve this avatar's neutral neck instead of assuming Unity-Chan bone axes.
         neckRestLocalRotation = neck.localRotation;
+        neckRestAvatarRotation = Quaternion.Inverse(transform.rotation) * neck.rotation;
         avatarToNeckParent = Quaternion.Inverse(neck.parent.rotation) * transform.rotation;
         autoBlinkScript = GetComponent("AutoBlink") as MonoBehaviour;
         autoBlinkScript.enabled = isAutoBlinkActive;
@@ -104,6 +109,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
                             ear_left = float.Parse(res[3]);
                             ear_right = float.Parse(res[4]);
                             mar = float.Parse(res[9]);
+                            hasFaceData = true;
                         }
                     }
                 }
@@ -137,6 +143,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     void HeadRotation()
     {
+        if (!hasFaceData) return;
         // clamp the angles to prevent unnatural movement
         float pitch_clamp = Mathf.Clamp(invertPitch ? -pitch : pitch, -max_rotation_angle, max_rotation_angle);
         float yaw_clamp = Mathf.Clamp(yaw, -max_rotation_angle, max_rotation_angle);
@@ -144,8 +151,13 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
         // do rotation at neck to control the movement of head
         Quaternion offset = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp);
-        neck.localRotation = avatarToNeckParent * offset
-            * Quaternion.Inverse(avatarToNeckParent) * neckRestLocalRotation;
+        if (compensateTorsoMotion)
+            // Face angles are camera-relative, not relative to the moving chest.
+            // Run after body retargeting so torso lean is not counted twice.
+            neck.rotation = transform.rotation * offset * neckRestAvatarRotation;
+        else
+            neck.localRotation = avatarToNeckParent * offset
+                * Quaternion.Inverse(avatarToNeckParent) * neckRestLocalRotation;
     }
 
     // for eye blinking effects
