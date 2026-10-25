@@ -191,6 +191,31 @@ public static class BodyTrackingRegressionChecks
             Vector3 rejectedElbow, rejectedWrist;
             Require(!HumanoidBodyController.SolveInferredArm(Vector3.zero, Vector3.one,
                 0, 0.25f, Vector3.down, out rejectedElbow, out rejectedWrist), "IK accepted a zero-length bone.");
+            // Keep elbows outside a torso-relative side boundary, preserving lengths.
+            Vector3 leftShoulder = new Vector3(-0.2f, 1, 0);
+            Vector3 badElbow = new Vector3(0, 0.8f, 0);
+            Vector3 handTarget = new Vector3(0, 0.6f, 0.2f);
+            Vector3 safeElbow, safeWrist;
+            Require(HumanoidBodyController.ConstrainElbow(leftShoulder, badElbow, handTarget,
+                new Vector3(0, 1, 0), Vector3.right, true, 0.14f, 0.3f, 0.25f,
+                out safeElbow, out safeWrist), "Elbow constraint rejected a valid rig.");
+            Require(safeElbow.x <= -0.14f + 0.001f, "Left elbow remained in chest center.");
+            Require(Mathf.Abs((safeElbow - leftShoulder).magnitude - 0.3f) < 0.001f,
+                "Elbow constraint stretched upper arm.");
+            Require(Mathf.Abs((safeWrist - safeElbow).magnitude - 0.25f) < 0.001f,
+                "Elbow constraint stretched forearm.");
+            Vector3 mirrorElbow, mirrorWrist;
+            HumanoidBodyController.ConstrainElbow(new Vector3(0.2f, 1, 0), badElbow, handTarget,
+                new Vector3(0, 1, 0), Vector3.right, false, 0.14f, 0.3f, 0.25f,
+                out mirrorElbow, out mirrorWrist);
+            Require(mirrorElbow.x >= 0.14f - 0.001f, "Right elbow remained in chest center.");
+            Quaternion torsoTurn = Quaternion.Euler(0, 35, 15);
+            Vector3 turnedElbow, turnedWrist;
+            HumanoidBodyController.ConstrainElbow(torsoTurn * leftShoulder, torsoTurn * badElbow,
+                torsoTurn * handTarget, torsoTurn * new Vector3(0, 1, 0), torsoTurn * Vector3.right,
+                true, 0.14f, 0.3f, 0.25f, out turnedElbow, out turnedWrist);
+            Require((turnedElbow - torsoTurn * safeElbow).magnitude < 0.001f,
+                "Elbow limit did not follow torso rotation.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }
