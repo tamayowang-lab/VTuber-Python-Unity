@@ -265,6 +265,8 @@ def main():
                 break
             if key == ord('c'):
                 head_orientation.reset()
+                if body_tracker:
+                    body_tracker.reset_depth()
                 print("Head neutral reset: face forward for the next detected frame.")
 
     finally:

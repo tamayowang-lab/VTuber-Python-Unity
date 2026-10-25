@@ -130,7 +130,7 @@ class BodyTrackingTests(unittest.TestCase):
         tracker = BodyTracker()
         try:
             packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8))
-            self.assertEqual(packet, dict(version=1, pose=[], leftHand=[], rightHand=[]))
+            self.assertEqual(packet, dict(version=1, pose=[], leftHand=[], rightHand=[], depthValid=False, depthOffset=0.0))
         finally:
             tracker.close()
 

@@ -76,6 +76,7 @@ public static class BodyTrackingRegressionChecks
 
             // A high-confidence inferred body wrist must not drive an arm
             // when its detailed hand detection is missing (default policy).
+            controller.requireHandForArmTracking = true;
             IDictionary boneMap = (IDictionary)Field(controller, "bones");
             boneMap[HumanBodyBones.LeftUpperArm] = bone;
             HumanoidBodyController.Point[] inferred = new HumanoidBodyController.Point[33];
@@ -85,6 +86,12 @@ public static class BodyTrackingRegressionChecks
             Call(controller, "ApplyArm", true, inferred, null);
             Require(Quaternion.Angle(joint.localRotation, raised) < 0.001f,
                 "Missing hand allowed inferred pose wrist to move the arm.");
+            // Default policy: reliable arm landmarks still update without fingers.
+            controller.requireHandForArmTracking = false;
+            BoneType.GetField("lastTracked").SetValue(bone, float.NegativeInfinity);
+            Call(controller, "ApplyArm", true, inferred, null);
+            Require(!float.IsNegativeInfinity((float)BoneType.GetField("lastTracked").GetValue(bone)),
+                "Reliable arm was blocked by missing hand landmarks.");
             boneMap.Remove(HumanBodyBones.LeftUpperArm);
 
             // A timed-out session must release ownership as well.
@@ -141,12 +148,34 @@ public static class BodyTrackingRegressionChecks
                 Call(controller, "ApplyLocal", upperBone, upperRest, 1f / 60, false);
                 Call(controller, "ApplyLocal", lowerBone, lowerRest, 1f / 60, false);
             }
-            Require(Vector3.Dot(upper.TransformDirection(Vector3.left), Vector3.down) > 0.95f,
+            Require(Vector3.Dot(upper.TransformDirection(Vector3.left), Vector3.down) > 0.93f,
                 "Relaxed upper arm did not point down.");
-            Require(Vector3.Dot(lower.TransformDirection(Vector3.left), Vector3.down) > 0.9f,
+            Require(Vector3.Dot(lower.TransformDirection(Vector3.left), Vector3.down) > 0.88f,
                 "Relaxed forearm did not point down.");
             Require((Vector3)BoneType.GetField("restDirection").GetValue(upperBone) == Vector3.left,
                 "Relaxed pose changed the retargeting bind direction.");
+            // Collapsed finger geometry must be rejected independently.
+            HumanoidBodyController.Point[] hand = new HumanoidBodyController.Point[21];
+            for (int i = 0; i < hand.Length; i++)
+                hand[i] = new HumanoidBodyController.Point { x = (i % 4) * 0.02f, y = i * 0.02f };
+            Require((bool)Call(controller, "FingerReliable", hand, 1, 0.15f), "Valid finger was rejected.");
+            hand[6] = hand[5];
+            Require(!(bool)Call(controller, "FingerReliable", hand, 1, 0.15f), "Collapsed finger was trusted.");
+            Require((bool)Call(controller, "FingerReliable", hand, 2, 0.15f), "One bad finger rejected another.");
+
+            // Whole-avatar depth must be bounded and respect explicit mode choice.
+            Set(controller, "rootRestPosition", root.transform.localPosition);
+            Set(controller, "rootForwardInParent", Vector3.forward);
+            Set(controller, "current", new HumanoidBodyController.Packet { depthValid = true, depthOffset = 0.5f });
+            controller.depthMotion = HumanoidBodyController.DepthMotionMode.WholeAvatar;
+            for (int i = 0; i < 180; i++) Call(controller, "ApplyDepthMotion", true, 1f / 60);
+            Require(root.transform.localPosition.z > 0.1f, "Whole-avatar depth did not move forward.");
+            Require(root.transform.localPosition.z <= controller.maximumDepthTranslation + 0.001f,
+                "Whole-avatar depth exceeded its limit.");
+            controller.depthMotion = HumanoidBodyController.DepthMotionMode.UpperBodyLean;
+            for (int i = 0; i < 240; i++) Call(controller, "ApplyDepthMotion", true, 1f / 60);
+            Require(Mathf.Abs(root.transform.localPosition.z) < 0.001f,
+                "Fixed-hip mode retained root translation.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

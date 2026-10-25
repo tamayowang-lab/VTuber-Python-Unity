@@ -7,6 +7,7 @@ import numpy as np
 
 import cv2
 import mediapipe as mp
+from body_depth import RelativeDepthEstimator
 
 
 def landmarks_to_points(landmarks, aspect=1.0, visibility=False):
@@ -76,6 +77,7 @@ def reject_duplicate_hands(result, width, height):
 class BodyTracker:
     def __init__(self):
         self.result = None
+        self.depth = RelativeDepthEstimator()
         self.model = mp.solutions.holistic.Holistic(
             model_complexity=1, smooth_landmarks=True,
             min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -85,7 +87,13 @@ class BodyTracker:
         rgb.flags.writeable = False
         self.result = reject_duplicate_hands(
             self.model.process(rgb), frame.shape[1], frame.shape[0])
-        return make_packet(self.result, frame.shape[1], frame.shape[0])
+        packet = make_packet(self.result, frame.shape[1], frame.shape[0])
+        valid, offset = self.depth.update(self.result, frame.shape[1], frame.shape[0])
+        packet.update(depthValid=valid, depthOffset=offset)
+        return packet
+
+    def reset_depth(self):
+        self.depth.reset()
 
     def draw(self, mirrored_frame):
         """Draw this frame's image landmarks on the mirrored face preview.
@@ -145,8 +153,11 @@ def preview():
             tracker.process(frame)
             image = tracker.draw(cv2.flip(frame, 1))
             cv2.imshow('Body and hands - Q to quit', image)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            if key == ord('c'):
+                tracker.reset_depth()
     finally:
         cap.release()
         if tracker:
