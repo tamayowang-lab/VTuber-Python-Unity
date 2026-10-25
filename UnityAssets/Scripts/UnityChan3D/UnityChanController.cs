@@ -19,7 +19,9 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public SkinnedMeshRenderer ref_SMR_EL_DEF;	//EL_DEFへの参照
 
     public float max_rotation_angle = 45.0f;
-    public bool invertPitch = true;
+    public bool invertPitch = false;
+    public bool invertYaw = true;
+    [Min(0)] public float headSmoothing = 10f;
     public bool compensateTorsoMotion = true;
 
     public float ear_max_threshold = 0.38f;
@@ -46,6 +48,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private Quaternion avatarToNeckParent;
     private Quaternion neckRestAvatarRotation;
     private volatile bool hasFaceData;
+    private Quaternion filteredHeadOffset = Quaternion.identity;
 
     // TCP stuff
     Thread receiveThread;
@@ -146,11 +149,14 @@ public class UnityChanController : MonoBehaviour, ISaveable
         if (!hasFaceData) return;
         // clamp the angles to prevent unnatural movement
         float pitch_clamp = Mathf.Clamp(invertPitch ? -pitch : pitch, -max_rotation_angle, max_rotation_angle);
-        float yaw_clamp = Mathf.Clamp(yaw, -max_rotation_angle, max_rotation_angle);
+        float yaw_clamp = Mathf.Clamp(invertYaw ? -yaw : yaw, -max_rotation_angle, max_rotation_angle);
         float roll_clamp = Mathf.Clamp(roll, -max_rotation_angle, max_rotation_angle);
 
         // do rotation at neck to control the movement of head
-        Quaternion offset = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp);
+        Quaternion target = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp);
+        float blend = headSmoothing <= 0 ? 1 : 1 - Mathf.Exp(-headSmoothing * Time.deltaTime);
+        filteredHeadOffset = Quaternion.Slerp(filteredHeadOffset, target, blend);
+        Quaternion offset = filteredHeadOffset;
         if (compensateTorsoMotion)
             // Face angles are camera-relative, not relative to the moving chest.
             // Run after body retargeting so torso lean is not counted twice.

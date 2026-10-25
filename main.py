@@ -16,6 +16,7 @@ from facial_landmark import FaceMeshDetector
 # pose estimation and stablization
 from pose_estimator import PoseEstimator
 from stabilizer import Stabilizer
+from head_pose import HeadOrientation
 
 # Miscellaneous detections (eyes/ mouth...)
 from facial_features import FacialFeatures, Eyes
@@ -98,6 +99,7 @@ def main():
 
         # Pose estimation related
         pose_estimator = PoseEstimator((img.shape[0], img.shape[1]))
+        head_orientation = HeadOrientation()
         image_points = np.zeros((pose_estimator.model_points_full.shape[0], 2))
 
         # extra 10 points due to new attention model (in iris detection)
@@ -218,9 +220,7 @@ def main():
                 # roll: +ve when the axis pointing upward
                 # pitch: +ve when we look upward
                 # yaw: +ve when we look left
-                roll = np.clip(np.degrees(steady_pose[0][1]), -90, 90)
-                pitch = np.clip(-(180 + np.degrees(steady_pose[0][0])), -90, 90)
-                yaw =  np.clip(np.degrees(steady_pose[0][2]), -90, 90)
+                roll, pitch, yaw = head_orientation.angles(pose[0])
 
                 # print("Roll: %.2f, Pitch: %.2f, Yaw: %.2f" % (roll, pitch, yaw))
                 # print("left eye: %.2f, %.2f; right eye %.2f, %.2f"
@@ -260,8 +260,12 @@ def main():
             cv2.imshow('Face, body and hands' if args.body else 'Facial landmark', img_facemesh)
 
             # press "q" to leave
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            if key == ord('c'):
+                head_orientation.reset()
+                print("Head neutral reset: face forward for the next detected frame.")
 
     finally:
         cap.release()

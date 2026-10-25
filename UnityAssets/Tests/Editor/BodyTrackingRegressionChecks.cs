@@ -23,6 +23,7 @@ public static class BodyTrackingRegressionChecks
         object bone = Activator.CreateInstance(BoneType, true);
         BoneType.GetField("transform").SetValue(bone, joint);
         BoneType.GetField("restLocal").SetValue(bone, Quaternion.identity);
+        BoneType.GetField("neutralLocal").SetValue(bone, Quaternion.identity);
         BoneType.GetField("restRotation").SetValue(bone, Quaternion.identity);
         BoneType.GetField("filteredLocal").SetValue(bone, initial);
         BoneType.GetField("avatarToParent").SetValue(bone, Quaternion.identity);
@@ -118,6 +119,34 @@ public static class BodyTrackingRegressionChecks
             controller.allowShoulderOnlyTorso = false;
             Call(controller, "ApplyTorso", pose, 1f / 60);
             Require(!controller.TorsoTracking, "Strict torso mode accepted invisible hips.");
+            // Compute a separate relaxed arm target without changing bind axes.
+            Transform upper = new GameObject("Upper arm").transform;
+            upper.SetParent(root.transform, false);
+            Transform lower = new GameObject("Forearm").transform;
+            lower.SetParent(upper, false);
+            lower.localPosition = Vector3.left;
+            object upperBone = AddBone(controller, upper, Quaternion.identity);
+            object lowerBone = AddBone(controller, lower, Quaternion.identity);
+            BoneType.GetField("restDirection").SetValue(upperBone, Vector3.left);
+            BoneType.GetField("restDirection").SetValue(lowerBone, Vector3.left);
+            boneMap[HumanBodyBones.LeftUpperArm] = upperBone;
+            boneMap[HumanBodyBones.LeftLowerArm] = lowerBone;
+            Call(controller, "ConfigureRelaxedArm", true);
+            Quaternion upperRest = (Quaternion)BoneType.GetField("neutralLocal").GetValue(upperBone);
+            Quaternion lowerRest = (Quaternion)BoneType.GetField("neutralLocal").GetValue(lowerBone);
+            for (int i = 0; i < 120; i++)
+            {
+                // Simulate an Animator repeatedly restoring the T-pose.
+                upper.localRotation = lower.localRotation = Quaternion.identity;
+                Call(controller, "ApplyLocal", upperBone, upperRest, 1f / 60, false);
+                Call(controller, "ApplyLocal", lowerBone, lowerRest, 1f / 60, false);
+            }
+            Require(Vector3.Dot(upper.TransformDirection(Vector3.left), Vector3.down) > 0.95f,
+                "Relaxed upper arm did not point down.");
+            Require(Vector3.Dot(lower.TransformDirection(Vector3.left), Vector3.down) > 0.9f,
+                "Relaxed forearm did not point down.");
+            Require((Vector3)BoneType.GetField("restDirection").GetValue(upperBone) == Vector3.left,
+                "Relaxed pose changed the retargeting bind direction.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

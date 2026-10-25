@@ -21,6 +21,9 @@ public class HumanoidBodyController : MonoBehaviour
     [Range(0, 5)] public float rotationDeadZone = 1f;
     [Min(0)] public float occlusionGracePeriod = 0.4f;
     public bool returnToRestWhenLost = true;
+    public bool useRelaxedArmRestPose = true;
+    [Range(0, 35)] public float restingArmSideAngle = 8f;
+    [Range(0, 45)] public float restingElbowBend = 12f;
     public float trackingTimeout = 0.5f;
     [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
     public bool requireHandForArmTracking = true;
@@ -42,7 +45,8 @@ public class HumanoidBodyController : MonoBehaviour
     class Bone
     {
         public Transform transform;
-        public Quaternion restLocal, restRotation, filteredLocal, avatarToParent;
+        public Quaternion restLocal, neutralLocal, restRotation, filteredLocal, avatarToParent;
+        public bool ownsPose;
         public Vector3 restDirection;
         public float lastTracked = float.NegativeInfinity;
     }
@@ -108,6 +112,8 @@ public class HumanoidBodyController : MonoBehaviour
             Debug.LogWarning("No usable Humanoid spine mapping; check Configure Avatar.", this);
         restTorsoFrame = Frame(transform.InverseTransformDirection(right.position - left.position),
                                transform.InverseTransformDirection(neck.position - hips.position));
+        ConfigureRelaxedArm(true);
+        ConfigureRelaxedArm(false);
         try
         {
             listener = new TcpListener(IPAddress.Loopback, port);
@@ -131,6 +137,7 @@ public class HumanoidBodyController : MonoBehaviour
         if (direction.sqrMagnitude < 1e-10f) return;
         bones[id] = new Bone { transform = bone, restLocal = bone.localRotation,
             restRotation = Quaternion.Inverse(transform.rotation) * bone.rotation,
+            neutralLocal = bone.localRotation,
             filteredLocal = bone.localRotation,
             avatarToParent = Quaternion.Inverse(bone.parent.rotation) * transform.rotation,
             restDirection = direction.normalized };
@@ -174,10 +181,46 @@ public class HumanoidBodyController : MonoBehaviour
             if (tip != null && bones.TryGetValue(fingers[i + 1], out previous))
                 bones[fingers[i + 2]] = new Bone { transform = tip, restLocal = tip.localRotation,
                     restRotation = Quaternion.Inverse(transform.rotation) * tip.rotation,
+                    neutralLocal = tip.localRotation,
                     filteredLocal = tip.localRotation,
                     avatarToParent = Quaternion.Inverse(tip.parent.rotation) * transform.rotation,
                     restDirection = previous.restDirection };
         }
+    }
+
+    void ConfigureRelaxedArm(bool left)
+    {
+        Bone upper, lower;
+        if (!bones.TryGetValue(left ? HumanBodyBones.LeftUpperArm : HumanBodyBones.RightUpperArm, out upper)
+            || !bones.TryGetValue(left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm, out lower)) return;
+        float side = left ? -1f : 1f;
+        float angle = restingArmSideAngle * Mathf.Deg2Rad;
+        float bend = restingElbowBend * Mathf.Deg2Rad;
+        Vector3 upperDirection = new Vector3(side * Mathf.Sin(angle), -Mathf.Cos(angle), 0);
+        Vector3 lowerDirection = new Vector3(side * Mathf.Sin(angle), -Mathf.Cos(angle), Mathf.Sin(bend)).normalized;
+        Quaternion upperRoot = Quaternion.FromToRotation(upper.restDirection, upperDirection) * upper.restRotation;
+        Quaternion lowerRoot = Quaternion.FromToRotation(lower.restDirection, lowerDirection) * lower.restRotation;
+        Quaternion parentRoot = Quaternion.Inverse(transform.rotation) * upper.transform.parent.rotation;
+        upper.neutralLocal = Quaternion.Inverse(parentRoot) * upperRoot;
+        // Preserve any intervening forearm/twist transform in the rig hierarchy.
+        Quaternion intervening = Quaternion.Inverse(upper.transform.rotation) * lower.transform.parent.rotation;
+        lower.neutralLocal = Quaternion.Inverse(upperRoot * intervening) * lowerRoot;
+    }
+
+    bool IsArmBone(HumanBodyBones id)
+    {
+        return id == HumanBodyBones.LeftUpperArm || id == HumanBodyBones.LeftLowerArm
+            || id == HumanBodyBones.RightUpperArm || id == HumanBodyBones.RightLowerArm;
+    }
+
+    void RelaxIdleArms()
+    {
+        // Use our cached pose, not Animator's T-pose on each frame.
+        foreach (HumanBodyBones id in new[] { HumanBodyBones.LeftUpperArm, HumanBodyBones.LeftLowerArm,
+            HumanBodyBones.LeftHand, HumanBodyBones.RightUpperArm, HumanBodyBones.RightLowerArm, HumanBodyBones.RightHand })
+            ResetBone(id);
+        foreach (HumanBodyBones id in LeftFingers) ResetBone(id);
+        foreach (HumanBodyBones id in RightFingers) ResetBone(id);
     }
 
     void Receive()
@@ -276,6 +319,7 @@ public class HumanoidBodyController : MonoBehaviour
                 Mathf.Max(1, maximumAngularSpeed) * deltaTime);
         }
         bone.transform.localRotation = bone.filteredLocal;
+        bone.ownsPose = true;
     }
 
     void HoldOrResetBone(HumanBodyBones id)
@@ -283,14 +327,18 @@ public class HumanoidBodyController : MonoBehaviour
         Bone bone;
         if (!bones.TryGetValue(id, out bone)) return;
         if (!returnToRestWhenLost || Time.time - bone.lastTracked <= occlusionGracePeriod)
+        {
             bone.transform.localRotation = bone.filteredLocal;
+            bone.ownsPose = true;
+        }
         else ResetBone(id);
     }
     void ResetBone(HumanBodyBones id)
     {
         Bone bone;
         if (bones.TryGetValue(id, out bone))
-            ApplyLocal(bone, bone.restLocal, Time.deltaTime, false);
+            ApplyLocal(bone, useRelaxedArmRestPose && IsArmBone(id)
+                ? bone.neutralLocal : bone.restLocal, Time.deltaTime, false);
     }
 
     void ApplyTorso(Point[] p, float deltaTime)
@@ -336,12 +384,14 @@ public class HumanoidBodyController : MonoBehaviour
             if (pending != null) { current = pending; pending = null; lastPacket = Time.time; }
             if (networkError != null) { Debug.LogWarning(networkError, this); networkError = null; }
         }
-        // No input means no ownership of the skeleton. Writing the rest pose
-        // here fights Animator/IK every frame, even before Python connects.
+        // With no input, leave the torso alone. Optionally own only the arms
+        // to maintain the requested relaxed rest pose from our cached filter.
         if (current == null || Time.time - lastPacket > trackingTimeout)
         {
             trackingActive = false;
             torsoTracking = false;
+            foreach (Bone bone in bones.Values) bone.ownsPose = false;
+            if (useRelaxedArmRestPose) RelaxIdleArms();
             return;
         }
         if (!trackingActive)
@@ -349,7 +399,7 @@ public class HumanoidBodyController : MonoBehaviour
             // Start/reconnect from the actual animated pose, not an old target.
             foreach (Bone bone in bones.Values)
             {
-                bone.filteredLocal = bone.transform.localRotation;
+                if (!bone.ownsPose) bone.filteredLocal = bone.transform.localRotation;
                 bone.lastTracked = float.NegativeInfinity;
             }
             trackingActive = true;
