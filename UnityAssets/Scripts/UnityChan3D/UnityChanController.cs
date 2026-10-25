@@ -18,6 +18,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public SkinnedMeshRenderer ref_SMR_EL_DEF;	//EL_DEFへの参照
 
     public float max_rotation_angle = 45.0f;
+    public bool invertPitch = true;
 
     public float ear_max_threshold = 0.38f;
     public float ear_min_threshold = 0.30f;
@@ -137,7 +138,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     void HeadRotation()
     {
         // clamp the angles to prevent unnatural movement
-        float pitch_clamp = Mathf.Clamp(pitch, -max_rotation_angle, max_rotation_angle);
+        float pitch_clamp = Mathf.Clamp(invertPitch ? -pitch : pitch, -max_rotation_angle, max_rotation_angle);
         float yaw_clamp = Mathf.Clamp(yaw, -max_rotation_angle, max_rotation_angle);
         float roll_clamp = Mathf.Clamp(roll, -max_rotation_angle, max_rotation_angle);
 

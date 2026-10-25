@@ -14,13 +14,17 @@ public class HumanoidBodyController : MonoBehaviour
 {
     public int port = 5067;
     [Range(0, 1)] public float minimumVisibility = 0.6f;
-    public float smoothing = 15f;
+    public float smoothing = 8f;
+    [Tooltip("Reverse camera depth so reaching toward the camera moves toward the avatar front.")]
+    public bool invertDepth = true;
+    [Min(1)] public float maximumAngularSpeed = 240f;
+    [Range(0, 5)] public float rotationDeadZone = 1f;
+    [Min(0)] public float occlusionGracePeriod = 0.2f;
     public float trackingTimeout = 0.5f;
 
     [Serializable] public class Point
     {
         public float x, y, z, visibility;
-        public Vector3 Position { get { return new Vector3(x, y, z); } }
     }
     [Serializable] public class Packet
     {
@@ -32,6 +36,7 @@ public class HumanoidBodyController : MonoBehaviour
         public Transform transform;
         public Quaternion restLocal, restRotation, filteredRotation;
         public Vector3 restDirection;
+        public float lastTracked = float.NegativeInfinity;
     }
 
     readonly Dictionary<HumanBodyBones, Bone> bones = new Dictionary<HumanBodyBones, Bone>();
@@ -208,6 +213,11 @@ public class HumanoidBodyController : MonoBehaviour
         foreach (int i in indices) if (p[i].visibility < minimumVisibility) return false;
         return true;
     }
+    Vector3 TrackingPosition(Point point)
+    {
+        return new Vector3(point.x, point.y, invertDepth ? -point.z : point.z);
+    }
+
     float Blend { get { return 1f - Mathf.Exp(-Mathf.Max(0, smoothing) * Time.deltaTime); } }
     void Aim(HumanBodyBones id, Vector3 direction)
     {
@@ -217,8 +227,23 @@ public class HumanoidBodyController : MonoBehaviour
     }
     void Rotate(Bone bone, Quaternion target)
     {
-        bone.filteredRotation = Quaternion.Slerp(bone.filteredRotation, target, Blend);
+        // Ignore small landmark noise and cap sudden monocular depth flips.
+        if (Quaternion.Angle(bone.filteredRotation, target) > rotationDeadZone)
+        {
+            Quaternion smooth = Quaternion.Slerp(bone.filteredRotation, target, Blend);
+            bone.filteredRotation = Quaternion.RotateTowards(bone.filteredRotation, smooth,
+                Mathf.Max(1, maximumAngularSpeed) * Time.deltaTime);
+        }
+        bone.lastTracked = Time.time;
         bone.transform.rotation = transform.rotation * bone.filteredRotation;
+    }
+    void HoldOrResetBone(HumanBodyBones id)
+    {
+        Bone bone;
+        if (!bones.TryGetValue(id, out bone)) return;
+        if (Time.time - bone.lastTracked <= occlusionGracePeriod)
+            bone.transform.rotation = transform.rotation * bone.filteredRotation;
+        else ResetBone(id);
     }
     void ResetBone(HumanBodyBones id)
     {
@@ -245,15 +270,15 @@ public class HumanoidBodyController : MonoBehaviour
         Point[] p = current.pose;
         if (Visible(p, 11, 12, 23, 24))
         {
-            Vector3 right = p[24].Position - p[23].Position;
-            Vector3 up = (p[11].Position + p[12].Position - p[23].Position - p[24].Position) * 0.5f;
+            Vector3 right = TrackingPosition(p[24]) - TrackingPosition(p[23]);
+            Vector3 up = (TrackingPosition(p[11]) + TrackingPosition(p[12]) - TrackingPosition(p[23]) - TrackingPosition(p[24])) * 0.5f;
             if (Vector3.Cross(right, up).sqrMagnitude > 1e-10f)
             {
                 Bone hips;
                 if (bones.TryGetValue(HumanBodyBones.Hips, out hips))
                     Rotate(hips, Frame(right, up) * Quaternion.Inverse(restTorsoFrame) * hips.restRotation);
             }
-            Vector3 shoulderRight = p[12].Position - p[11].Position;
+            Vector3 shoulderRight = TrackingPosition(p[12]) - TrackingPosition(p[11]);
             Bone spine;
             if (Vector3.Cross(shoulderRight, up).sqrMagnitude > 1e-10f
                 && bones.TryGetValue(HumanBodyBones.Spine, out spine))
@@ -271,18 +296,18 @@ public class HumanoidBodyController : MonoBehaviour
         HumanBodyBones lower = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         HumanBodyBones palm = left ? HumanBodyBones.LeftHand : HumanBodyBones.RightHand;
         HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
-        if (Visible(p, shoulder, elbow)) Aim(upper, p[elbow].Position - p[shoulder].Position);
-        else ResetBone(upper);
-        if (Visible(p, elbow, wrist)) Aim(lower, p[wrist].Position - p[elbow].Position);
-        else ResetBone(lower);
+        if (Visible(p, shoulder, elbow)) Aim(upper, TrackingPosition(p[elbow]) - TrackingPosition(p[shoulder]));
+        else HoldOrResetBone(upper);
+        if (Visible(p, elbow, wrist)) Aim(lower, TrackingPosition(p[wrist]) - TrackingPosition(p[elbow]));
+        else HoldOrResetBone(lower);
         if (hand == null || hand.Length != 21)
         {
-            ResetBone(palm);
-            foreach (HumanBodyBones id in fingers) ResetBone(id);
+            HoldOrResetBone(palm);
+            foreach (HumanBodyBones id in fingers) HoldOrResetBone(id);
             return;
         }
-        Vector3 palmRight = hand[5].Position - hand[17].Position;
-        Vector3 palmUp = hand[9].Position - hand[0].Position;
+        Vector3 palmRight = TrackingPosition(hand[5]) - TrackingPosition(hand[17]);
+        Vector3 palmUp = TrackingPosition(hand[9]) - TrackingPosition(hand[0]);
         Bone palmBone;
         Quaternion restFrame;
         if (Vector3.Cross(palmRight, palmUp).sqrMagnitude > 1e-10f
@@ -293,7 +318,7 @@ public class HumanoidBodyController : MonoBehaviour
             for (int segment = 0; segment < 3; segment++)
             {
                 int start = 1 + finger * 4 + segment;
-                Aim(fingers[finger * 3 + segment], hand[start + 1].Position - hand[start].Position);
+                Aim(fingers[finger * 3 + segment], TrackingPosition(hand[start + 1]) - TrackingPosition(hand[start]));
             }
     }
 
