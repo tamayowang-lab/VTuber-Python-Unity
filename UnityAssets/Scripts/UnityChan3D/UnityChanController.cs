@@ -8,6 +8,8 @@ using System.Threading;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.IO;
+using System.Globalization;
 
 [DefaultExecutionOrder(200)]
 public class UnityChanController : MonoBehaviour, ISaveable
@@ -24,6 +26,21 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public bool invertRoll = true;
     [Min(0)] public float headSmoothing = 10f;
     public bool compensateTorsoMotion = true;
+
+    [Header("Iris / gaze tracking")]
+    public bool enableEyeTracking = true;
+    public Transform leftEye;
+    public Transform rightEye;
+    [Range(0, 35)] public float maximumEyeYaw = 20f;
+    [Range(0, 25)] public float maximumEyePitch = 12f;
+    [Min(0)] public float eyeSmoothing = 12f;
+    [Min(0.01f)] public float irisHorizontalRange = 0.25f;
+    [Min(0.01f)] public float irisVerticalRange = 0.3f;
+    public bool invertEyeHorizontal;
+    public bool invertEyeVertical;
+    [Min(0)] public float gazeBlinkThreshold = 0.15f;
+    public Vector2 gazeNeutral = new Vector2(0.5f, 0.5f);
+    public bool calibrateEyesOnFirstSample = true;
 
     public float ear_max_threshold = 0.38f;
     public float ear_min_threshold = 0.30f;
@@ -49,6 +66,13 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private Quaternion avatarToNeckParent;
     private Quaternion neckRestAvatarRotation;
     private volatile bool hasFaceData;
+    private readonly object faceGate = new object();
+    private float[] pendingFace;
+    private volatile bool stopping;
+    private float lastFaceTime = float.NegativeInfinity;
+    private bool gazeCalibrated, gazeCalibrationRequested;
+    private Quaternion leftEyeRest, rightEyeRest, leftEyeFrame, rightEyeFrame;
+    private Quaternion filteredEyeOffset = Quaternion.identity;
     private Quaternion filteredHeadOffset = Quaternion.identity;
 
     // TCP stuff
@@ -58,7 +82,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     int port = 5066;
 
     private float roll = 0, pitch = 0, yaw = 0;
-    // private float x_ratio_left = 0, y_ratio_left = 0, x_ratio_right = 0, y_ratio_right = 0;
+    private float x_ratio_left = 0.5f, y_ratio_left = 0.5f, x_ratio_right = 0.5f, y_ratio_right = 0.5f;
     private float ear_left = 0, ear_right = 0;
     private float mar = 0;
 
@@ -73,8 +97,14 @@ public class UnityChanController : MonoBehaviour, ISaveable
         neckRestAvatarRotation = Quaternion.Inverse(transform.rotation) * neck.rotation;
         avatarToNeckParent = Quaternion.Inverse(neck.parent.rotation) * transform.rotation;
         autoBlinkScript = GetComponent("AutoBlink") as MonoBehaviour;
-        autoBlinkScript.enabled = isAutoBlinkActive;
+        if (autoBlinkScript != null) autoBlinkScript.enabled = isAutoBlinkActive;
         SetEyes(eye_ratio_open);
+        if (leftEye == null) leftEye = anim.GetBoneTransform(HumanBodyBones.LeftEye);
+        if (rightEye == null) rightEye = anim.GetBoneTransform(HumanBodyBones.RightEye);
+        CaptureEye(leftEye, out leftEyeRest, out leftEyeFrame);
+        CaptureEye(rightEye, out rightEyeRest, out rightEyeFrame);
+        if (enableEyeTracking && leftEye == null && rightEye == null)
+            Debug.LogWarning("Eye tracking needs mapped Humanoid LeftEye/RightEye bones or manually assigned eye transforms.", this);
 
         // Commented the following two lines to make it error-free when following the YT Tutorial
         // A full, updated version which works with the UI system can be found after importing the unity packages to a Unity project
@@ -86,46 +116,110 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     // Launch TCP to receive message from python
     private void InitTCP() {
+        try
+        {
+            listener = new TcpListener(IPAddress.Loopback, port);
+            listener.Start();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("Face tracking listener: " + e.Message, this);
+            return;
+        }
         receiveThread = new Thread(new ThreadStart(ReceiveData));
         receiveThread.IsBackground = true;
         receiveThread.Start();
     }
 
-    private void ReceiveData() {
-        try {
-            listener = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
-            listener.Start();
-            Byte[] bytes = new Byte[1024];
-
-            while (true) {
-                using(client = listener.AcceptTcpClient()) {
-                    using (NetworkStream stream = client.GetStream()) {
-                        int length;
-                        while ((length = stream.Read(bytes, 0, bytes.Length)) != 0) {
-                            var incommingData = new byte[length];
-                            Array.Copy(bytes, 0, incommingData, 0, length);
-                            string clientMessage = Encoding.ASCII.GetString(incommingData);
-                            string[] res = clientMessage.Split(' ');
-
-                            roll = float.Parse(res[0]);
-                            pitch = float.Parse(res[1]);
-                            yaw = float.Parse(res[2]);
-                            ear_left = float.Parse(res[3]);
-                            ear_right = float.Parse(res[4]);
-                            mar = float.Parse(res[9]);
-                            hasFaceData = true;
-                        }
-                    }
+    // The legacy sender emits 11 whitespace-separated floats per face sample.
+    // TCP reads can split a number or contain several samples. Decode complete
+    // tokens before publishing an atomic sample to Unity's main thread.
+    public class FaceStreamDecoder
+    {
+        readonly StringBuilder token = new StringBuilder();
+        readonly float[] values = new float[11];
+        int count;
+        bool invalid;
+        public void Feed(string chunk, Action<float[]> publish)
+        {
+            foreach (char c in chunk)
+            {
+                if (!char.IsWhiteSpace(c))
+                {
+                    if (token.Length >= 64) throw new IOException("Face token exceeds 64 characters.");
+                    token.Append(c);
+                    continue;
+                }
+                if (token.Length == 0) continue;
+                float value;
+                bool valid = float.TryParse(token.ToString(), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out value) && !float.IsNaN(value) && !float.IsInfinity(value);
+                invalid |= !valid;
+                values[count++] = valid ? value : 0;
+                token.Length = 0;
+                if (count == values.Length)
+                {
+                    if (!invalid) publish((float[])values.Clone());
+                    count = 0;
+                    invalid = false;
                 }
             }
-        } catch(Exception e) {
-            print(e.ToString());
         }
+    }
+
+    private void ReceiveData()
+    {
+        try
+        {
+            byte[] bytes = new byte[4096];
+            while (!stopping)
+            {
+                TcpClient accepted = listener.AcceptTcpClient();
+                lock (faceGate)
+                {
+                    if (stopping) { accepted.Close(); return; }
+                    client = accepted;
+                }
+                try
+                {
+                    using (accepted)
+                    using (NetworkStream stream = accepted.GetStream())
+                    {
+                        FaceStreamDecoder decoder = new FaceStreamDecoder();
+                        int length;
+                        while (!stopping && (length = stream.Read(bytes, 0, bytes.Length)) > 0)
+                            decoder.Feed(Encoding.ASCII.GetString(bytes, 0, length), sample => {
+                                lock (faceGate) pendingFace = sample;
+                            });
+                    }
+                }
+                catch (IOException) { /* Allow a sender to reconnect. */ }
+                catch (SocketException) { }
+                finally { lock (faceGate) client = null; }
+            }
+        }
+        catch (Exception e) { if (!stopping) Console.Error.WriteLine("Face tracking receiver: " + e.Message); }
+    }
+
+    void ConsumeFace()
+    {
+        float[] sample;
+        lock (faceGate) { sample = pendingFace; pendingFace = null; }
+        if (sample == null) return;
+        roll = sample[0]; pitch = sample[1]; yaw = sample[2];
+        ear_left = sample[3]; ear_right = sample[4];
+        x_ratio_left = sample[5]; y_ratio_left = sample[6];
+        x_ratio_right = sample[7]; y_ratio_right = sample[8];
+        mar = sample[9];
+        hasFaceData = true;
+        lastFaceTime = Time.time;
     }
 
     // Update is called once per frame
     void Update()
     {
+        ConsumeFace();
+        if (Input.GetKeyDown(KeyCode.G)) RecalibrateEyes();
         print(string.Format("Roll: {0:F}; Pitch: {1:F}; Yaw: {2:F}", roll, pitch, yaw));
         // print(string.Format("Left eye: {0:F}, {1:F}; Right eye: {2:F}, {3:F}",
         //     x_ratio_left, y_ratio_left, x_ratio_right, y_ratio_right));
@@ -143,6 +237,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     void LateUpdate()
     {
         HeadRotation();
+        EyeMovement();
     }
 
     void HeadRotation()
@@ -167,6 +262,73 @@ public class UnityChanController : MonoBehaviour, ISaveable
                 * Quaternion.Inverse(avatarToNeckParent) * neckRestLocalRotation;
     }
 
+    void CaptureEye(Transform eye, out Quaternion rest, out Quaternion frame)
+    {
+        rest = eye == null ? Quaternion.identity : eye.localRotation;
+        frame = eye == null || eye.parent == null ? Quaternion.identity
+            : Quaternion.Inverse(eye.parent.rotation) * transform.rotation;
+    }
+
+    [ContextMenu("Recalibrate gaze neutral")]
+    public void RecalibrateEyes()
+    {
+        gazeCalibrationRequested = true;
+    }
+
+    public static Vector2 GazeAngles(Vector2 iris, Vector2 neutral, float horizontalRange,
+        float verticalRange, float maxYaw, float maxPitch, bool invertHorizontal, bool invertVertical)
+    {
+        float yaw = Mathf.Clamp((iris.x - neutral.x) / Mathf.Max(0.01f, horizontalRange), -1, 1) * maxYaw;
+        float pitch = Mathf.Clamp((iris.y - neutral.y) / Mathf.Max(0.01f, verticalRange), -1, 1) * maxPitch;
+        return new Vector2(invertVertical ? -pitch : pitch, invertHorizontal ? -yaw : yaw);
+    }
+
+    void EyeMovement()
+    {
+        if (!enableEyeTracking || (leftEye == null && rightEye == null)) return;
+        Quaternion target = filteredEyeOffset;
+        bool fresh = hasFaceData && Time.time - lastFaceTime < 0.5f;
+        if (!fresh) target = Quaternion.identity;
+        else
+        {
+            Vector2 sum = Vector2.zero;
+            int count = 0;
+            if (UsableIris(x_ratio_left, y_ratio_left, ear_left))
+            { sum += new Vector2(x_ratio_left, y_ratio_left); count++; }
+            if (UsableIris(x_ratio_right, y_ratio_right, ear_right))
+            { sum += new Vector2(x_ratio_right, y_ratio_right); count++; }
+            // During a blink keep the previous gaze; closed-eye iris estimates
+            // are unreliable. A lost face instead eases the eyes to neutral.
+            if (count > 0)
+            {
+                Vector2 iris = sum / count;
+                if (!gazeCalibrated || gazeCalibrationRequested)
+                {
+                    if (calibrateEyesOnFirstSample || gazeCalibrationRequested) gazeNeutral = iris;
+                    gazeCalibrated = true;
+                    gazeCalibrationRequested = false;
+                }
+                Vector2 angles = GazeAngles(iris, gazeNeutral, irisHorizontalRange, irisVerticalRange,
+                    maximumEyeYaw, maximumEyePitch, invertEyeHorizontal, invertEyeVertical);
+                target = Quaternion.Euler(angles.x, angles.y, 0);
+            }
+        }
+        float blend = eyeSmoothing <= 0 ? 1 : 1 - Mathf.Exp(-eyeSmoothing * Time.deltaTime);
+        filteredEyeOffset = Quaternion.Slerp(filteredEyeOffset, target, blend);
+        ApplyEye(leftEye, leftEyeRest, leftEyeFrame);
+        ApplyEye(rightEye, rightEyeRest, rightEyeFrame);
+    }
+
+    bool UsableIris(float x, float y, float ear)
+    {
+        return ear >= gazeBlinkThreshold && x >= -0.25f && x <= 1.25f && y >= -0.25f && y <= 1.25f;
+    }
+
+    void ApplyEye(Transform eye, Quaternion rest, Quaternion frame)
+    {
+        if (eye != null) eye.localRotation = frame * filteredEyeOffset * Quaternion.Inverse(frame) * rest;
+    }
+
     // for eye blinking effects
     void EyeBlinking()
     {
@@ -186,7 +348,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     public void EnableAutoBlink(bool enabled)
     {
-        autoBlinkScript.enabled = enabled;
+        if (autoBlinkScript != null) autoBlinkScript.enabled = enabled;
         isAutoBlinkActive = enabled;
     }
 
@@ -204,10 +366,12 @@ public class UnityChanController : MonoBehaviour, ISaveable
         ref_SMR_MTH_DEF.SetBlendShapeWeight(2, ratio);
     }
 
-    void OnApplicationQuit()
+    void OnDestroy()
     {
-        // close the thread when the application quits
-        receiveThread.Abort();
+        stopping = true;
+        if (listener != null) listener.Stop();
+        lock (faceGate) { if (client != null) client.Close(); }
+        if (receiveThread != null) receiveThread.Join(1000);
     }
 
     // Save Load Interface Implementation
