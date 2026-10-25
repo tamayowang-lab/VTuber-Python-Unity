@@ -126,11 +126,24 @@ class BodyTrackingTests(unittest.TestCase):
             point.y += 0.1
         self.assertIs(reject_duplicate_hands(result, 640, 480), result)
 
+    def test_image_shoulder_anchors_use_same_units_as_hand_wrist(self):
+        tracker = BodyTracker.__new__(BodyTracker)
+        tracker.model = Mock()
+        tracker.model.process.return_value = NS(pose_landmarks=landmarks(33),
+            pose_world_landmarks=landmarks(33), left_hand_landmarks=landmarks(21), right_hand_landmarks=None)
+        tracker.depth = Mock()
+        tracker.depth.update.return_value = (False, 0.0)
+        packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8))
+        self.assertEqual(len(packet['imagePose']), 33)
+        for axis in ('x', 'y'):
+            self.assertEqual(packet['imagePose'][11][axis], packet['leftHand'][0][axis])
+        self.assertEqual(packet['imagePose'][11]['visibility'], 0.8)
+
     def test_real_inference_without_person_emits_empty_arrays(self):
         tracker = BodyTracker()
         try:
             packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8))
-            self.assertEqual(packet, dict(version=1, pose=[], leftHand=[], rightHand=[], depthValid=False, depthOffset=0.0))
+            self.assertEqual(packet, dict(version=1, pose=[], leftHand=[], rightHand=[], depthValid=False, depthOffset=0.0, imagePose=[]))
         finally:
             tracker.close()
 

@@ -21,6 +21,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public float max_rotation_angle = 45.0f;
     public bool invertPitch = false;
     public bool invertYaw = true;
+    public bool invertRoll = true;
     [Min(0)] public float headSmoothing = 10f;
     public bool compensateTorsoMotion = true;
 
@@ -150,7 +151,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
         // clamp the angles to prevent unnatural movement
         float pitch_clamp = Mathf.Clamp(invertPitch ? -pitch : pitch, -max_rotation_angle, max_rotation_angle);
         float yaw_clamp = Mathf.Clamp(invertYaw ? -yaw : yaw, -max_rotation_angle, max_rotation_angle);
-        float roll_clamp = Mathf.Clamp(roll, -max_rotation_angle, max_rotation_angle);
+        float roll_clamp = Mathf.Clamp(invertRoll ? -roll : roll, -max_rotation_angle, max_rotation_angle);
 
         // do rotation at neck to control the movement of head
         Quaternion target = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp);

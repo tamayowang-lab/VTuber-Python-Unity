@@ -176,6 +176,21 @@ public static class BodyTrackingRegressionChecks
             for (int i = 0; i < 240; i++) Call(controller, "ApplyDepthMotion", true, 1f / 60);
             Require(Mathf.Abs(root.transform.localPosition.z) < 0.001f,
                 "Fixed-hip mode retained root translation.");
+            // Constrained hand-only IK must preserve lengths even for targets
+            // far beyond reach, and must avoid a locked straight elbow.
+            foreach (Vector3 target in new[] { new Vector3(-10, 4, 0.2f),
+                new Vector3(-0.1f, -0.5f, 0.1f), new Vector3(-0.01f, 0, 0.01f) })
+            {
+                Vector3 elbow, wrist;
+                Require(HumanoidBodyController.SolveInferredArm(Vector3.zero, target,
+                    0.3f, 0.25f, new Vector3(-0.5f, -1, 0.5f), out elbow, out wrist), "IK rejected valid lengths.");
+                Require(Mathf.Abs(elbow.magnitude - 0.3f) < 0.001f, "IK stretched upper arm.");
+                Require(Mathf.Abs((wrist - elbow).magnitude - 0.25f) < 0.001f, "IK stretched forearm.");
+                Require(wrist.magnitude <= 0.55f * 0.95f + 0.001f, "IK exceeded safe reach.");
+            }
+            Vector3 rejectedElbow, rejectedWrist;
+            Require(!HumanoidBodyController.SolveInferredArm(Vector3.zero, Vector3.one,
+                0, 0.25f, Vector3.down, out rejectedElbow, out rejectedWrist), "IK accepted a zero-length bone.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

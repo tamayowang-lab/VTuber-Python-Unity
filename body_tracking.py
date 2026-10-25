@@ -89,7 +89,9 @@ class BodyTracker:
             self.model.process(rgb), frame.shape[1], frame.shape[0])
         packet = make_packet(self.result, frame.shape[1], frame.shape[0])
         valid, offset = self.depth.update(self.result, frame.shape[1], frame.shape[0])
-        packet.update(depthValid=valid, depthOffset=offset)
+        packet.update(depthValid=valid, depthOffset=offset,
+                      imagePose=landmarks_to_points(self.result.pose_landmarks,
+                                                   frame.shape[1] / frame.shape[0], visibility=True))
         return packet
 
     def reset_depth(self):
