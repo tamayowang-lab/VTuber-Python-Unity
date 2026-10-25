@@ -39,7 +39,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public float mar_min_threshold = 0.0f;
 
     private Transform neck;
-    private Quaternion neck_quat;
+    private Quaternion neckRestLocalRotation;
+    private Quaternion avatarToNeckParent;
 
     // TCP stuff
     Thread receiveThread;
@@ -58,7 +59,9 @@ public class UnityChanController : MonoBehaviour, ISaveable
         anim = GetComponent<Animator> ();
 
         neck = anim.GetBoneTransform(HumanBodyBones.Neck);
-        neck_quat = Quaternion.Euler(0, 90, -90);
+        // Preserve this avatar's neutral neck instead of assuming Unity-Chan bone axes.
+        neckRestLocalRotation = neck.localRotation;
+        avatarToNeckParent = Quaternion.Inverse(neck.parent.rotation) * transform.rotation;
         autoBlinkScript = GetComponent("AutoBlink") as MonoBehaviour;
         autoBlinkScript.enabled = isAutoBlinkActive;
         SetEyes(eye_ratio_open);
@@ -116,8 +119,6 @@ public class UnityChanController : MonoBehaviour, ISaveable
         // print(string.Format("Left eye: {0:F}, {1:F}; Right eye: {2:F}, {3:F}",
         //     x_ratio_left, y_ratio_left, x_ratio_right, y_ratio_right));
 
-        // do rotation at neck to control the movement of head
-        HeadRotation();
 
         // disable the eye blinking control by the user if AutoBlink script is running
         if (!isAutoBlinkActive)
@@ -127,6 +128,12 @@ public class UnityChanController : MonoBehaviour, ISaveable
     }
 
 
+    // Apply after Animator evaluation. Local rotation also follows the tracked torso.
+    void LateUpdate()
+    {
+        HeadRotation();
+    }
+
     void HeadRotation()
     {
         // clamp the angles to prevent unnatural movement
@@ -135,7 +142,9 @@ public class UnityChanController : MonoBehaviour, ISaveable
         float roll_clamp = Mathf.Clamp(roll, -max_rotation_angle, max_rotation_angle);
 
         // do rotation at neck to control the movement of head
-        neck.rotation = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp) * neck_quat;
+        Quaternion offset = Quaternion.Euler(pitch_clamp, yaw_clamp, roll_clamp);
+        neck.localRotation = avatarToNeckParent * offset
+            * Quaternion.Inverse(avatarToNeckParent) * neckRestLocalRotation;
     }
 
     // for eye blinking effects
