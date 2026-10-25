@@ -187,3 +187,37 @@ Hiyori Momose's model
 MIT
 
 The Unity Chan model in the Unity Packages provided is distributed under Unity-Chan License © Unity Technologies Japan/UCL. A seperate sets of that License is included in UnityAssets/Licenses/UCL2_0
+
+## Torso, arm and finger tracking (3D Humanoid avatars)
+
+Install Python 3.10–3.12 and the compatible dependencies:
+
+```sh
+python -m pip install -r requirements.txt
+```
+
+1. Import the UnityChan package, or use another model with its Rig set to **Humanoid** and a valid Avatar. Check that shoulders, arms, hands and all finger bones are correctly mapped in Configure Avatar.
+2. Copy `UnityAssets/Scripts/UnityChan3D/HumanoidBodyController.cs` into your Unity project's Assets folder. The existing `.unitypackage` files do not contain this new script.
+3. Attach `HumanoidBodyController` to the same GameObject as the model's Animator. Keep the existing face controller for head, eyes and mouth. Start with the model in its neutral T-pose: the new component records the rig's initial bone directions. Disable competing arm/hand IK, animation scripts and root motion; use the Animator's **Normal** update mode. The body component applies rotations in `LateUpdate`.
+4. Run the scene. Enable the existing face TCP server on port **5066**. The body component starts its own loopback TCP listener on **5067**.
+5. On the same camera-equipped computer, run:
+
+```sh
+python main.py --connect --body --debug
+# Custom ports must match both Unity components:
+python main.py --connect --body --port 5066 --body-port 5067 --cam 0
+```
+
+Without `--connect`, `python main.py --body --debug` detects landmarks locally. Without `--body`, the original face-only workflow is retained, including Live2D compatibility. Use an unmirrored camera feed: body tracking assigns anatomical left/right and converts coordinates to an avatar facing the camera.
+
+Keep hips, shoulders, elbows and hands visible, with enough light and space between fingers. Tracking drives hip/torso orientation, both arms, palm orientation, and three segments of each finger. Missing finger bones are skipped. Tune **Minimum Visibility**, **Smoothing** (higher follows faster), and **Tracking Timeout** in the Inspector. Occluded limbs return toward the initial pose; stale connections also return the body to that pose. The face and body streams are independent, so body updates continue when no face is found.
+
+This is monocular motion estimation: hand depth, occlusion and fast movements can be inaccurate. It does not implement walking, foot IK, global body translation, or precise anatomical joint limits. Body/hand inference adds CPU cost. Avatar-specific visual tuning must be checked in the Unity Editor.
+
+The additional protocol is newline-delimited JSON (`version: 1`), containing `pose` (33 world landmarks), `leftHand` and `rightHand` (21 landmarks each). Each point has `x`, `y`, `z`, `visibility`; an empty array means tracking was lost. Pose coordinates are in meters; hands use image-relative coordinates with aspect correction, so only their directions are used. The receiver handles split/coalesced TCP reads, validates frames, and applies bone changes on Unity's main thread. The existing face protocol is unchanged.
+
+Run the Python regression checks from the repository root:
+
+```sh
+python -m unittest discover -s tests -v
+```
