@@ -255,7 +255,9 @@ def main():
                 # reset our pose estimator
                 pose_estimator = PoseEstimator((img_facemesh.shape[0], img_facemesh.shape[1]))
 
-            cv2.imshow('Facial landmark', img_facemesh)
+            if body_tracker:
+                body_tracker.draw(img_facemesh)
+            cv2.imshow('Face, body and hands' if args.body else 'Facial landmark', img_facemesh)
 
             # press "q" to leave
             if cv2.waitKey(1) & 0xFF == ord('q'):

@@ -28,6 +28,7 @@ def make_packet(results, width, height):
 
 class BodyTracker:
     def __init__(self):
+        self.result = None
         self.model = mp.solutions.holistic.Holistic(
             model_complexity=1, smooth_landmarks=True,
             min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -35,8 +36,31 @@ class BodyTracker:
     def process(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        result = self.model.process(rgb)
-        return make_packet(result, frame.shape[1], frame.shape[0])
+        self.result = self.model.process(rgb)
+        return make_packet(self.result, frame.shape[1], frame.shape[0])
+
+    def draw(self, mirrored_frame):
+        """Draw this frame's image landmarks on the mirrored face preview.
+
+        Keep image coordinates separate from the metric Unity pose packet.
+        Draw before flipping so handedness and overlay positions stay aligned.
+        """
+        if self.result is None:
+            return mirrored_frame
+        canvas = cv2.flip(mirrored_frame, 1)
+        drawing = mp.solutions.drawing_utils
+        holistic = mp.solutions.holistic
+        for landmarks, connections, color in (
+            (self.result.pose_landmarks, holistic.POSE_CONNECTIONS, (0, 255, 0)),
+            (self.result.left_hand_landmarks, holistic.HAND_CONNECTIONS, (255, 180, 0)),
+            (self.result.right_hand_landmarks, holistic.HAND_CONNECTIONS, (0, 140, 255)),
+        ):
+            if landmarks is not None:
+                drawing.draw_landmarks(canvas, landmarks, connections,
+                    drawing.DrawingSpec(color=color, thickness=2, circle_radius=3),
+                    drawing.DrawingSpec(color=color, thickness=2))
+        mirrored_frame[:] = cv2.flip(canvas, 1)
+        return mirrored_frame
 
     def close(self):
         self.model.close()
@@ -52,3 +76,35 @@ class BodySender:
 
     def close(self):
         self.socket.close()
+
+
+def preview():
+    """Standalone camera preview, with no Unity connection required."""
+    from argparse import ArgumentParser
+    parser = ArgumentParser(description="Preview body, arm and finger tracking. Press Q to quit.")
+    parser.add_argument('--cam', type=int, default=0)
+    args = parser.parse_args()
+    cap = cv2.VideoCapture(args.cam)
+    tracker = None
+    try:
+        if not cap.isOpened():
+            raise RuntimeError("Cannot open camera; check --cam and camera permissions")
+        tracker = BodyTracker()
+        while True:
+            success, frame = cap.read()
+            if not success:
+                raise RuntimeError("Cannot read camera frame")
+            tracker.process(frame)
+            image = tracker.draw(cv2.flip(frame, 1))
+            cv2.imshow('Body and hands - Q to quit', image)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    finally:
+        cap.release()
+        if tracker:
+            tracker.close()
+        cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    preview()

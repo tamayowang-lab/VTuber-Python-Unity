@@ -221,3 +221,15 @@ Run the Python regression checks from the repository root:
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+### Real-time body and hand preview
+
+For a standalone camera view, like `facial_landmark.py`, run:
+
+```sh
+python body_tracking.py
+# Select a different camera:
+python body_tracking.py --cam 1
+```
+
+Or use `python main.py --body` to overlay body and hands on the existing face preview. Add `--connect` to also drive Unity. Both previews are mirrored, with green pose connections, blue left-hand connections and orange right-hand connections. Each detected hand displays its 21 landmarks and finger connections. Press **Q** to quit. No Unity connection is required to preview detections.

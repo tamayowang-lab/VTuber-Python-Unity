@@ -68,6 +68,27 @@ class BodyTrackingTests(unittest.TestCase):
             finally:
                 sender.close()
 
+    def test_preview_mirrors_image_landmarks_without_changing_packet(self):
+        from mediapipe.framework.formats import landmark_pb2
+        hand = landmark_pb2.NormalizedLandmarkList()
+        for i in range(21):
+            hand.landmark.add(x=0.2 + (i % 4) * 0.01, y=0.4 + (i // 4) * 0.02, z=0)
+        result = NS(pose_landmarks=None, pose_world_landmarks=None,
+                    left_hand_landmarks=hand, right_hand_landmarks=None)
+        tracker = BodyTracker.__new__(BodyTracker)
+        tracker.result = result
+        before = make_packet(result, 640, 480)
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        returned = tracker.draw(image)
+        self.assertIs(returned, image)
+        self.assertTrue(image[:, 480:530].any())
+        self.assertFalse(image[:, :320].any())
+        self.assertEqual(before, make_packet(result, 640, 480))
+        tracker.result = NS(pose_landmarks=None, left_hand_landmarks=None, right_hand_landmarks=None)
+        blank = np.zeros_like(image)
+        tracker.draw(blank)
+        self.assertFalse(blank.any())
+
     def test_real_inference_without_person_emits_empty_arrays(self):
         tracker = BodyTracker()
         try:
@@ -100,6 +121,7 @@ class MainIntegrationTests(unittest.TestCase):
              patch('body_tracking.BodyTracker', return_value=tracker), \
              patch('body_tracking.BodySender', return_value=sender):
             main.main()
+        tracker.draw.assert_called_once_with(frame)
         sender.send.assert_called_once_with(tracker.process.return_value)
         face_socket.send.assert_not_called()
         for resource in (sender, tracker, face_socket):
