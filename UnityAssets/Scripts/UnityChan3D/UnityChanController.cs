@@ -1,8 +1,5 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
-// TCP stuff
 using System;
 using System.Threading;
 using System.Net;
@@ -14,9 +11,6 @@ using System.Globalization;
 [DefaultExecutionOrder(200)]
 public class UnityChanController : MonoBehaviour, ISaveable
 {
-    private Animator anim;
-
-    // for blinking stuff
     public SkinnedMeshRenderer ref_SMR_EYE_DEF;	//EYE_DEFへの参照
     public SkinnedMeshRenderer ref_SMR_EL_DEF;	//EL_DEFへの参照
 
@@ -43,6 +37,10 @@ public class UnityChanController : MonoBehaviour, ISaveable
     [Range(0, 35)] public float maximumEyeYaw = 20f;
     [Range(0, 25)] public float maximumEyePitch = 12f;
     [Min(0)] public float eyeSmoothing = 12f;
+    [Tooltip("Multiply iris displacement before the gaze limit. X = horizontal, Y = vertical.")]
+    public Vector2 gazeSensitivity = Vector2.one;
+    [Tooltip("Sweep the eyes without Python/blink input to test the renderer or shader. Turn off after testing.")]
+    public bool previewEyeMovement;
     [Min(0.01f)] public float irisHorizontalRange = 0.25f;
     [Min(0.01f)] public float irisVerticalRange = 0.3f;
     public bool invertEyeHorizontal;
@@ -57,14 +55,6 @@ public class UnityChanController : MonoBehaviour, ISaveable
     public bool isAutoBlinkActive;
     private MonoBehaviour autoBlinkScript;
 
-    [HideInInspector]
-    public float eye_ratio_close = 85.0f;
-    [HideInInspector]
-    public float eye_ratio_half_close = 20.0f;
-    [HideInInspector]
-    public float eye_ratio_open = 0.0f;
-
-    // for mouth movement stuff
     public SkinnedMeshRenderer ref_SMR_MTH_DEF;     // the mouth component
 
     public float mar_max_threshold = 1.0f;
@@ -93,8 +83,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private EyeSurface leftSurface, rightSurface;
     private Quaternion filteredHeadOffset = Quaternion.identity;
 
-    // TCP stuff
-    Thread receiveThread;
+        Thread receiveThread;
     TcpClient client;
     TcpListener listener;
     int port = 5066;
@@ -104,10 +93,9 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private float ear_left = 0, ear_right = 0;
     private float mar = 0;
 
-    // Start is called before the first frame update
     void Start()
     {
-        anim = GetComponent<Animator> ();
+        Animator anim = GetComponent<Animator>();
 
         neck = anim.GetBoneTransform(HumanBodyBones.Neck);
         // Preserve this avatar's neutral neck instead of assuming Unity-Chan bone axes.
@@ -116,7 +104,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
         avatarToNeckParent = Quaternion.Inverse(neck.parent.rotation) * transform.rotation;
         autoBlinkScript = GetComponent("AutoBlink") as MonoBehaviour;
         if (autoBlinkScript != null) autoBlinkScript.enabled = isAutoBlinkActive;
-        SetEyes(eye_ratio_open);
+        SetEyes(0);
         if (leftEye == null) leftEye = anim.GetBoneTransform(HumanBodyBones.LeftEye);
         if (rightEye == null) rightEye = anim.GetBoneTransform(HumanBodyBones.RightEye);
         ConfigureEye(leftEye, leftEyeRenderer, out rotateLeftEye, out leftSurface);
@@ -125,11 +113,6 @@ public class UnityChanController : MonoBehaviour, ISaveable
         CaptureEye(rotateRightEye ? rightEye : null, out rightEyeRest, out rightEyeFrame);
         if (enableEyeTracking && !rotateLeftEye && !rotateRightEye && leftSurface == null && rightSurface == null)
             Debug.LogWarning("Eye tracking needs eye bones or dedicated eye mesh renderers with a supported texture property.", this);
-
-        // Commented the following two lines to make it error-free when following the YT Tutorial
-        // A full, updated version which works with the UI system can be found after importing the unity packages to a Unity project
-        // GameObject.FindWithTag("GameController").GetComponent<UISystem>().LoadData();
-        // GameObject.FindWithTag("GameController").GetComponent<UISystem>().InitUI();
 
         InitTCP();
     }
@@ -248,23 +231,16 @@ public class UnityChanController : MonoBehaviour, ISaveable
 #endif
     }
 
-    // Update is called once per frame
     void Update()
     {
         ConsumeFace();
         if (GazeCalibrationPressed()) RecalibrateEyes();
-        print(string.Format("Roll: {0:F}; Pitch: {1:F}; Yaw: {2:F}", roll, pitch, yaw));
-        // print(string.Format("Left eye: {0:F}, {1:F}; Right eye: {2:F}, {3:F}",
-        //     x_ratio_left, y_ratio_left, x_ratio_right, y_ratio_right));
-
-
         // disable the eye blinking control by the user if AutoBlink script is running
         if (!isAutoBlinkActive)
             EyeBlinking();
 
         MouthMoving();
     }
-
 
     // Apply after Animator evaluation. Local rotation also follows the tracked torso.
     void LateUpdate()
@@ -328,8 +304,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
         float horizontal = maxYaw > 0 ? Mathf.Clamp(angles.y / maxYaw, -1, 1) : 0;
         float vertical = maxPitch > 0 ? Mathf.Clamp(angles.x / maxPitch, -1, 1) : 0;
         // Texture sampling offsets move visible texture content in the opposite direction.
-        return new Vector2(-horizontal * Mathf.Clamp(Mathf.Abs(limit.x), 0, 0.1f) * Mathf.Clamp(direction.x, -1, 1),
-            vertical * Mathf.Clamp(Mathf.Abs(limit.y), 0, 0.1f) * Mathf.Clamp(direction.y, -1, 1));
+        return new Vector2(-horizontal * Mathf.Clamp(Mathf.Abs(limit.x), 0, 0.25f) * Mathf.Clamp(direction.x, -1, 1),
+            vertical * Mathf.Clamp(Mathf.Abs(limit.y), 0, 0.25f) * Mathf.Clamp(direction.y, -1, 1));
     }
 
     void ApplyEyeSurface(EyeSurface surface, Vector2 offset)
@@ -363,10 +339,11 @@ public class UnityChanController : MonoBehaviour, ISaveable
     }
 
     public static Vector2 GazeAngles(Vector2 iris, Vector2 neutral, float horizontalRange,
-        float verticalRange, float maxYaw, float maxPitch, bool invertHorizontal, bool invertVertical)
+        float verticalRange, float maxYaw, float maxPitch, bool invertHorizontal, bool invertVertical,
+        float horizontalSensitivity = 1, float verticalSensitivity = 1)
     {
-        float yaw = Mathf.Clamp((iris.x - neutral.x) / Mathf.Max(0.01f, horizontalRange), -1, 1) * maxYaw;
-        float pitch = Mathf.Clamp((iris.y - neutral.y) / Mathf.Max(0.01f, verticalRange), -1, 1) * maxPitch;
+        float yaw = Mathf.Clamp((iris.x - neutral.x) * Mathf.Clamp(horizontalSensitivity, 0, 20) / Mathf.Max(0.01f, horizontalRange), -1, 1) * maxYaw;
+        float pitch = Mathf.Clamp((iris.y - neutral.y) * Mathf.Clamp(verticalSensitivity, 0, 20) / Mathf.Max(0.01f, verticalRange), -1, 1) * maxPitch;
         return new Vector2(invertVertical ? -pitch : pitch, invertHorizontal ? -yaw : yaw);
     }
 
@@ -387,7 +364,13 @@ public class UnityChanController : MonoBehaviour, ISaveable
         if (!rotateLeftEye && !rotateRightEye && leftSurface == null && rightSurface == null) return;
         Vector2 target = filteredGazeAngles;
         bool fresh = hasFaceData && Time.time - lastFaceTime < 0.5f;
-        if (!fresh) target = Vector2.zero;
+        if (previewEyeMovement)
+        {
+            target = new Vector2(Mathf.Cos(Time.unscaledTime * 0.9f) * maximumEyePitch,
+                Mathf.Sin(Time.unscaledTime * 1.2f) * maximumEyeYaw);
+            SetEyes(0); // Make the texture sweep visible even with no camera connected.
+        }
+        else if (!fresh) target = Vector2.zero;
         else
         {
             Vector2 sum = Vector2.zero;
@@ -408,7 +391,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
                     gazeCalibrationRequested = false;
                 }
                 Vector2 angles = GazeAngles(iris, gazeNeutral, irisHorizontalRange, irisVerticalRange,
-                    maximumEyeYaw, maximumEyePitch, invertEyeHorizontal, invertEyeVertical);
+                    maximumEyeYaw, maximumEyePitch, invertEyeHorizontal, invertEyeVertical,
+                    gazeSensitivity.x, gazeSensitivity.y);
                 target = angles;
             }
         }
@@ -434,21 +418,19 @@ public class UnityChanController : MonoBehaviour, ISaveable
             * Quaternion.Inverse(frame) * rest;
     }
 
-    // for eye blinking effects
     void EyeBlinking()
     {
         float ear_min = Mathf.Min(ear_left, ear_right);
         ear_min = Mathf.Clamp(ear_min, ear_min_threshold, ear_max_threshold);
         float x = Mathf.Abs((ear_min - ear_min_threshold) / (ear_max_threshold - ear_min_threshold) - 1);
-        // formula found using desmos regression
-        // dependent on the eye_ratio_half_close and eye_ratio_close
+        // Existing Unity-Chan eyelid blend-shape response curve.
         float y = 90 * Mathf.Pow(x, 2) - 5 * x;
         SetEyes(y);
     }
 
     void SetEyes(float ratio) {
-        ref_SMR_EYE_DEF.SetBlendShapeWeight (6, ratio);
-        ref_SMR_EL_DEF.SetBlendShapeWeight (6, ratio);
+        if (ref_SMR_EYE_DEF != null) ref_SMR_EYE_DEF.SetBlendShapeWeight(6, ratio);
+        if (ref_SMR_EL_DEF != null) ref_SMR_EL_DEF.SetBlendShapeWeight(6, ratio);
     }
 
     public void EnableAutoBlink(bool enabled)
@@ -457,7 +439,6 @@ public class UnityChanController : MonoBehaviour, ISaveable
         isAutoBlinkActive = enabled;
     }
 
-    // for mouth movement
     void MouthMoving() {
         float mar_clamped = Mathf.Clamp(mar, mar_min_threshold, mar_max_threshold);
         float ratio = (mar_clamped - mar_min_threshold) / (mar_max_threshold - mar_min_threshold);

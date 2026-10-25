@@ -21,6 +21,19 @@ public static class EyeTrackingRegressionChecks
         Require(UnityChanController.GazeAngles(Vector2.one, neutral, 0.25f, 0.3f, 20, 12, true, true)
             == -limit, "Gaze direction toggles failed.");
 
+        Vector2 subtle = UnityChanController.GazeAngles(new Vector2(0.52f, 0.52f), neutral,
+            0.25f, 0.3f, 20, 12, false, false);
+        Vector2 amplified = UnityChanController.GazeAngles(new Vector2(0.52f, 0.52f), neutral,
+            0.25f, 0.3f, 20, 12, false, false, 3, 3);
+        Require((amplified - subtle * 3).magnitude < 0.001f, "Sensitivity did not multiply small iris movements.");
+        Vector2 amplifiedLimit = UnityChanController.GazeAngles(Vector2.one, neutral,
+            0.25f, 0.3f, 20, 12, false, false, 20, 20);
+        Require(amplifiedLimit == limit, "Sensitivity bypassed gaze limits.");
+        Vector2 wideUv = UnityChanController.GazeUvOffset(new Vector2(12, 20), 20, 12,
+            new Vector2(0.08f, 0.06f), Vector2.one);
+        Require(Mathf.Abs(wideUv.x + 0.08f) < 0.0001f && Mathf.Abs(wideUv.y - 0.06f) < 0.0001f,
+            "Wide UV diagnostic range was clipped to the previous limit.");
+
         Vector2 uv = UnityChanController.GazeUvOffset(new Vector2(12, 20), 20, 12,
             new Vector2(0.02f, 0.015f), Vector2.one);
         Require(Mathf.Abs(uv.x + 0.02f) < 0.0001f && Mathf.Abs(uv.y - 0.015f) < 0.0001f,
@@ -93,6 +106,22 @@ public static class EyeTrackingRegressionChecks
                     renderer.GetPropertyBlock(block, 0);
                     Require(Mathf.Abs(block.GetVector(Shader.PropertyToID("_MainTex_ST")).z - 0.1f) < 0.0001f,
                         "Material gaze did not restore its initial offset.");
+                    // Preview must bypass missing face packets and the blink gate.
+                    controller.previewEyeMovement = true;
+                    controller.eyeSmoothing = 0;
+                    type.GetField("hasFaceData", hidden).SetValue(controller, false);
+                    type.GetMethod("EyeMovement", hidden).Invoke(controller, null);
+                    Vector2 previewAngles = (Vector2)type.GetField("filteredGazeAngles", hidden).GetValue(controller);
+                    Vector2 expectedPreview = new Vector2(Mathf.Cos(Time.unscaledTime * 0.9f) * controller.maximumEyePitch,
+                        Mathf.Sin(Time.unscaledTime * 1.2f) * controller.maximumEyeYaw);
+                    Require((previewAngles - expectedPreview).magnitude < 0.001f,
+                        "Diagnostic sweep incorrectly required live face or open-eye input.");
+                    Require(Quaternion.Angle(surfaceObject.transform.localRotation, beforeRotation) < 0.001f,
+                        "Diagnostic material sweep rotated the mesh.");
+                    controller.previewEyeMovement = false;
+                    type.GetMethod("EyeMovement", hidden).Invoke(controller, null);
+                    Require((Vector2)type.GetField("filteredGazeAngles", hidden).GetValue(controller) == Vector2.zero,
+                        "Leaving preview with no input did not restore neutral gaze.");
                 }
                 finally { UnityEngine.Object.DestroyImmediate(material); }
             }
