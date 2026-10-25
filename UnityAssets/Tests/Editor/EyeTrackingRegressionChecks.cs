@@ -21,6 +21,13 @@ public static class EyeTrackingRegressionChecks
         Require(UnityChanController.GazeAngles(Vector2.one, neutral, 0.25f, 0.3f, 20, 12, true, true)
             == -limit, "Gaze direction toggles failed.");
 
+        Vector2 uv = UnityChanController.GazeUvOffset(new Vector2(12, 20), 20, 12,
+            new Vector2(0.02f, 0.015f), Vector2.one);
+        Require(Mathf.Abs(uv.x + 0.02f) < 0.0001f && Mathf.Abs(uv.y - 0.015f) < 0.0001f,
+            "UV movement did not respect configured direction/limits.");
+        Require(UnityChanController.GazeUvOffset(Vector2.zero, 20, 12, Vector2.one, Vector2.one) == Vector2.zero,
+            "Neutral gaze changed the texture offset.");
+
         var decoder = new UnityChanController.FaceStreamDecoder();
         var samples = new List<float[]>();
         CultureInfo previous = CultureInfo.CurrentCulture;
@@ -54,6 +61,42 @@ public static class EyeTrackingRegressionChecks
                 "Left iris was not applied on main thread.");
             Require(Mathf.Abs((float)type.GetField("y_ratio_right", hidden).GetValue(controller) - 0.9f) < 0.001f,
                 "Right iris was not applied on main thread.");
+            GameObject surfaceObject = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            surfaceObject.transform.SetParent(root.transform);
+            surfaceObject.transform.localRotation = Quaternion.Euler(10, 20, 30);
+            Quaternion beforeRotation = surfaceObject.transform.localRotation;
+            Renderer renderer = surfaceObject.GetComponent<Renderer>();
+            Shader shader = Shader.Find("Unlit/Texture");
+            if (shader != null)
+            {
+                Material material = new Material(shader);
+                try
+                {
+                    material.SetTextureOffset("_MainTex", new Vector2(0.1f, 0.2f));
+                    renderer.sharedMaterial = material;
+                    object[] configure = { surfaceObject.transform, renderer, false, null };
+                    type.GetMethod("ConfigureEye", hidden).Invoke(controller, configure);
+                    Require(!(bool)configure[2], "Automatic mode tried to rotate a mesh surface.");
+                    Require(configure[3] != null, "Supported material surface was not configured.");
+                    type.GetMethod("ApplyEyeSurface", hidden).Invoke(controller, new object[] { configure[3], uv });
+                    Require(Quaternion.Angle(surfaceObject.transform.localRotation, beforeRotation) < 0.001f,
+                        "Material gaze rotated the mesh.");
+                    Require(material.GetTextureOffset("_MainTex") == new Vector2(0.1f, 0.2f),
+                        "Material gaze mutated the shared material.");
+                    MaterialPropertyBlock block = new MaterialPropertyBlock();
+                    renderer.GetPropertyBlock(block, 0);
+                    Vector4 st = block.GetVector(Shader.PropertyToID("_MainTex_ST"));
+                    Require(Mathf.Abs(st.z - (0.1f + uv.x)) < 0.0001f,
+                        "Per-renderer UV offset was not applied.");
+                    type.GetField("leftSurface", hidden).SetValue(controller, configure[3]);
+                    type.GetMethod("RestoreEyeSurfaces", hidden).Invoke(controller, null);
+                    renderer.GetPropertyBlock(block, 0);
+                    Require(Mathf.Abs(block.GetVector(Shader.PropertyToID("_MainTex_ST")).z - 0.1f) < 0.0001f,
+                        "Material gaze did not restore its initial offset.");
+                }
+                finally { UnityEngine.Object.DestroyImmediate(material); }
+            }
+            else Debug.LogWarning("Unlit/Texture unavailable: material-property-block checks were skipped.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }
         Debug.Log("PASS: gaze neutral/limits/directions, fragmented face transport, invariant parsing, iris sample application.");

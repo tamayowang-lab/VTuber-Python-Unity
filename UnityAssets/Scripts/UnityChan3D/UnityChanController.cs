@@ -29,6 +29,15 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     [Header("Iris / gaze tracking")]
     public bool enableEyeTracking = true;
+    public enum EyeDriveMode { Automatic, BoneRotation, MaterialOffset }
+    public EyeDriveMode eyeDriveMode = EyeDriveMode.Automatic;
+    public Renderer leftEyeRenderer;
+    public Renderer rightEyeRenderer;
+    [Min(0)] public int eyeMaterialIndex;
+    public string eyeTextureProperty = "_MainTex";
+    public Vector2 maximumEyeUvOffset = new Vector2(0.02f, 0.015f);
+    public Vector2 leftEyeUvDirection = Vector2.one;
+    public Vector2 rightEyeUvDirection = Vector2.one;
     public Transform leftEye;
     public Transform rightEye;
     [Range(0, 35)] public float maximumEyeYaw = 20f;
@@ -72,7 +81,16 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private float lastFaceTime = float.NegativeInfinity;
     private bool gazeCalibrated, gazeCalibrationRequested;
     private Quaternion leftEyeRest, rightEyeRest, leftEyeFrame, rightEyeFrame;
-    private Quaternion filteredEyeOffset = Quaternion.identity;
+    private Vector2 filteredGazeAngles;
+    private bool rotateLeftEye, rotateRightEye, gazeWasDriven;
+    class EyeSurface
+    {
+        public Renderer renderer;
+        public int slot, property;
+        public Vector4 initialST;
+        public MaterialPropertyBlock block = new MaterialPropertyBlock();
+    }
+    private EyeSurface leftSurface, rightSurface;
     private Quaternion filteredHeadOffset = Quaternion.identity;
 
     // TCP stuff
@@ -101,10 +119,12 @@ public class UnityChanController : MonoBehaviour, ISaveable
         SetEyes(eye_ratio_open);
         if (leftEye == null) leftEye = anim.GetBoneTransform(HumanBodyBones.LeftEye);
         if (rightEye == null) rightEye = anim.GetBoneTransform(HumanBodyBones.RightEye);
-        CaptureEye(leftEye, out leftEyeRest, out leftEyeFrame);
-        CaptureEye(rightEye, out rightEyeRest, out rightEyeFrame);
-        if (enableEyeTracking && leftEye == null && rightEye == null)
-            Debug.LogWarning("Eye tracking needs mapped Humanoid LeftEye/RightEye bones or manually assigned eye transforms.", this);
+        ConfigureEye(leftEye, leftEyeRenderer, out rotateLeftEye, out leftSurface);
+        ConfigureEye(rightEye, rightEyeRenderer, out rotateRightEye, out rightSurface);
+        CaptureEye(rotateLeftEye ? leftEye : null, out leftEyeRest, out leftEyeFrame);
+        CaptureEye(rotateRightEye ? rightEye : null, out rightEyeRest, out rightEyeFrame);
+        if (enableEyeTracking && !rotateLeftEye && !rotateRightEye && leftSurface == null && rightSurface == null)
+            Debug.LogWarning("Eye tracking needs eye bones or dedicated eye mesh renderers with a supported texture property.", this);
 
         // Commented the following two lines to make it error-free when following the YT Tutorial
         // A full, updated version which works with the UI system can be found after importing the unity packages to a Unity project
@@ -275,6 +295,60 @@ public class UnityChanController : MonoBehaviour, ISaveable
                 * Quaternion.Inverse(avatarToNeckParent) * neckRestLocalRotation;
     }
 
+    void ConfigureEye(Transform eye, Renderer surface, out bool rotate, out EyeSurface materialTarget)
+    {
+        if (surface == null && eye != null) surface = eye.GetComponent<Renderer>();
+        // A MeshRenderer assignment is a surface, not proof of an eyeball pivot.
+        // Automatic mode never rotates that mesh around its imported origin.
+        rotate = eye != null && (eyeDriveMode == EyeDriveMode.BoneRotation
+            || (eyeDriveMode == EyeDriveMode.Automatic && surface == null));
+        materialTarget = null;
+        if (rotate || eyeDriveMode == EyeDriveMode.BoneRotation || surface == null) return;
+        Material[] materials = surface.sharedMaterials;
+        if (eyeMaterialIndex < 0 || eyeMaterialIndex >= materials.Length || materials[eyeMaterialIndex] == null) return;
+        Material material = materials[eyeMaterialIndex];
+        string texture = eyeTextureProperty;
+        if (string.IsNullOrEmpty(texture)) texture = "_MainTex";
+        if (!material.HasProperty(texture))
+        {
+            Debug.LogWarning("Eye material has no " + texture + " texture. Set Eye Texture Property for its shader.", surface);
+            return;
+        }
+        Vector2 scale = material.GetTextureScale(texture);
+        Vector2 offset = material.GetTextureOffset(texture);
+        materialTarget = new EyeSurface { renderer = surface, slot = eyeMaterialIndex,
+            property = Shader.PropertyToID(texture + "_ST"), initialST = new Vector4(scale.x, scale.y, offset.x, offset.y) };
+        surface.GetPropertyBlock(materialTarget.block, eyeMaterialIndex);
+        Vector4 previous = materialTarget.block.GetVector(materialTarget.property);
+        if (previous.x != 0 || previous.y != 0) materialTarget.initialST = previous;
+    }
+
+    public static Vector2 GazeUvOffset(Vector2 angles, float maxYaw, float maxPitch, Vector2 limit, Vector2 direction)
+    {
+        float horizontal = maxYaw > 0 ? Mathf.Clamp(angles.y / maxYaw, -1, 1) : 0;
+        float vertical = maxPitch > 0 ? Mathf.Clamp(angles.x / maxPitch, -1, 1) : 0;
+        // Texture sampling offsets move visible texture content in the opposite direction.
+        return new Vector2(-horizontal * Mathf.Clamp(Mathf.Abs(limit.x), 0, 0.1f) * Mathf.Clamp(direction.x, -1, 1),
+            vertical * Mathf.Clamp(Mathf.Abs(limit.y), 0, 0.1f) * Mathf.Clamp(direction.y, -1, 1));
+    }
+
+    void ApplyEyeSurface(EyeSurface surface, Vector2 offset)
+    {
+        if (surface == null || surface.renderer == null) return;
+        surface.renderer.GetPropertyBlock(surface.block, surface.slot);
+        Vector4 st = surface.initialST;
+        st.z += offset.x;
+        st.w += offset.y;
+        surface.block.SetVector(surface.property, st);
+        surface.renderer.SetPropertyBlock(surface.block, surface.slot);
+    }
+
+    void RestoreEyeSurfaces()
+    {
+        ApplyEyeSurface(leftSurface, Vector2.zero);
+        ApplyEyeSurface(rightSurface, Vector2.zero);
+    }
+
     void CaptureEye(Transform eye, out Quaternion rest, out Quaternion frame)
     {
         rest = eye == null ? Quaternion.identity : eye.localRotation;
@@ -298,10 +372,22 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     void EyeMovement()
     {
-        if (!enableEyeTracking || (leftEye == null && rightEye == null)) return;
-        Quaternion target = filteredEyeOffset;
+        if (!enableEyeTracking)
+        {
+            if (gazeWasDriven)
+            {
+                RestoreEyeSurfaces();
+                if (rotateLeftEye && leftEye != null) leftEye.localRotation = leftEyeRest;
+                if (rotateRightEye && rightEye != null) rightEye.localRotation = rightEyeRest;
+                filteredGazeAngles = Vector2.zero;
+                gazeWasDriven = false;
+            }
+            return;
+        }
+        if (!rotateLeftEye && !rotateRightEye && leftSurface == null && rightSurface == null) return;
+        Vector2 target = filteredGazeAngles;
         bool fresh = hasFaceData && Time.time - lastFaceTime < 0.5f;
-        if (!fresh) target = Quaternion.identity;
+        if (!fresh) target = Vector2.zero;
         else
         {
             Vector2 sum = Vector2.zero;
@@ -323,13 +409,18 @@ public class UnityChanController : MonoBehaviour, ISaveable
                 }
                 Vector2 angles = GazeAngles(iris, gazeNeutral, irisHorizontalRange, irisVerticalRange,
                     maximumEyeYaw, maximumEyePitch, invertEyeHorizontal, invertEyeVertical);
-                target = Quaternion.Euler(angles.x, angles.y, 0);
+                target = angles;
             }
         }
         float blend = eyeSmoothing <= 0 ? 1 : 1 - Mathf.Exp(-eyeSmoothing * Time.deltaTime);
-        filteredEyeOffset = Quaternion.Slerp(filteredEyeOffset, target, blend);
-        ApplyEye(leftEye, leftEyeRest, leftEyeFrame);
-        ApplyEye(rightEye, rightEyeRest, rightEyeFrame);
+        filteredGazeAngles = Vector2.Lerp(filteredGazeAngles, target, blend);
+        if (rotateLeftEye) ApplyEye(leftEye, leftEyeRest, leftEyeFrame);
+        if (rotateRightEye) ApplyEye(rightEye, rightEyeRest, rightEyeFrame);
+        ApplyEyeSurface(leftSurface, GazeUvOffset(filteredGazeAngles, maximumEyeYaw, maximumEyePitch,
+            maximumEyeUvOffset, leftEyeUvDirection));
+        ApplyEyeSurface(rightSurface, GazeUvOffset(filteredGazeAngles, maximumEyeYaw, maximumEyePitch,
+            maximumEyeUvOffset, rightEyeUvDirection));
+        gazeWasDriven = true;
     }
 
     bool UsableIris(float x, float y, float ear)
@@ -339,7 +430,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
 
     void ApplyEye(Transform eye, Quaternion rest, Quaternion frame)
     {
-        if (eye != null) eye.localRotation = frame * filteredEyeOffset * Quaternion.Inverse(frame) * rest;
+        if (eye != null) eye.localRotation = frame * Quaternion.Euler(filteredGazeAngles.x, filteredGazeAngles.y, 0)
+            * Quaternion.Inverse(frame) * rest;
     }
 
     // for eye blinking effects
@@ -379,8 +471,14 @@ public class UnityChanController : MonoBehaviour, ISaveable
         ref_SMR_MTH_DEF.SetBlendShapeWeight(2, ratio);
     }
 
+    void OnDisable()
+    {
+        RestoreEyeSurfaces();
+    }
+
     void OnDestroy()
     {
+        RestoreEyeSurfaces();
         stopping = true;
         if (listener != null) listener.Stop();
         lock (faceGate) { if (client != null) client.Close(); }
