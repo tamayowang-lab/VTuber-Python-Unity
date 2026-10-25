@@ -233,3 +233,5 @@ python body_tracking.py --cam 1
 ```
 
 Or use `python main.py --body` to overlay body and hands on the existing face preview. Add `--connect` to also drive Unity. Both previews are mirrored, with green pose connections, blue left-hand connections and orange right-hand connections. Each detected hand displays its 21 landmarks and finger connections. Press **Q** to quit. No Unity connection is required to preview detections.
+
+If blue and orange hand skeletons overlap on one hand, a duplicate filter now compares the full hand shapes and checks the body wrist positions. It keeps the hand supported by a visible wrist; ambiguous duplicates are hidden from both the preview and Unity stream. Keep shoulders and wrists visible for reliable assignment. Two genuinely overlapping hands can also be suppressed; this filter reduces duplicate detections but does not guarantee handedness during occlusion.

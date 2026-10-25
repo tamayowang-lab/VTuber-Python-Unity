@@ -1,6 +1,9 @@
 """Optional CPU body/hand tracking and newline-framed Unity transport."""
 import json
 import socket
+from types import SimpleNamespace
+
+import numpy as np
 
 import cv2
 import mediapipe as mp
@@ -26,6 +29,50 @@ def make_packet(results, width, height):
                 rightHand=landmarks_to_points(results.right_hand_landmarks, width / height))
 
 
+def reject_duplicate_hands(result, width, height):
+    """Suppress two nearly identical hand skeletons, using visible pose wrists.
+
+    Compare full image-space skeletons, not just wrists: crossed wrists alone
+    must not discard two different hands. Ambiguous duplicates are both hidden
+    rather than driving two avatar hands with one observation.
+    """
+    left, right = result.left_hand_landmarks, result.right_hand_landmarks
+    if left is None or right is None:
+        return result
+
+    def xy(landmarks):
+        return np.array([(p.x * width / height, p.y) for p in landmarks.landmark])
+
+    a, b = xy(left), xy(right)
+    if a.shape != (21, 2) or b.shape != (21, 2):
+        return result
+    def palm_size(points):
+        return max(np.linalg.norm(points[9] - points[0]),
+                   np.linalg.norm(points[5] - points[17]), 1e-6)
+    scale = min(palm_size(a), palm_size(b))
+    separation = np.sqrt(np.mean(np.sum((a - b) ** 2, axis=1)))
+    if separation > 0.35 * scale:
+        return result
+
+    pose = result.pose_landmarks
+    def wrist_error(points, index):
+        if pose is None:
+            return float('inf')
+        wrist = pose.landmark[index]
+        if wrist.visibility < 0.6 or not (0 <= wrist.x <= 1 and 0 <= wrist.y <= 1):
+            return float('inf')
+        position = np.array([wrist.x * width / height, wrist.y])
+        return np.linalg.norm(points[0] - position) / scale
+
+    left_error, right_error = wrist_error(a, 15), wrist_error(b, 16)
+    keep_left = left_error <= 1.5 and left_error + 0.25 < right_error
+    keep_right = right_error <= 1.5 and right_error + 0.25 < left_error
+    return SimpleNamespace(pose_landmarks=pose,
+        pose_world_landmarks=result.pose_world_landmarks,
+        left_hand_landmarks=left if keep_left else None,
+        right_hand_landmarks=right if keep_right else None)
+
+
 class BodyTracker:
     def __init__(self):
         self.result = None
@@ -36,7 +83,8 @@ class BodyTracker:
     def process(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        self.result = self.model.process(rgb)
+        self.result = reject_duplicate_hands(
+            self.model.process(rgb), frame.shape[1], frame.shape[0])
         return make_packet(self.result, frame.shape[1], frame.shape[0])
 
     def draw(self, mirrored_frame):

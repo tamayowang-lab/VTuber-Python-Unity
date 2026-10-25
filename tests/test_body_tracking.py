@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 
 import numpy as np
 
-from body_tracking import BodySender, BodyTracker, make_packet
+from body_tracking import BodySender, BodyTracker, make_packet, reject_duplicate_hands
 
 
 def landmarks(count):
@@ -88,6 +88,43 @@ class BodyTrackingTests(unittest.TestCase):
         blank = np.zeros_like(image)
         tracker.draw(blank)
         self.assertFalse(blank.any())
+
+    def test_duplicate_hands_use_pose_wrists_for_both_preview_and_packet(self):
+        from mediapipe.framework.formats import landmark_pb2
+        def hand(x):
+            points = landmark_pb2.NormalizedLandmarkList()
+            for i in range(21):
+                points.landmark.add(x=x + (i % 4) * 0.02,
+                                   y=0.4 + (i // 4) * 0.02, z=0)
+            return points
+        left, right = hand(0.2), hand(0.201)
+        pose = landmarks(33)
+        pose.landmark[15] = NS(x=0.2, y=0.4, visibility=0.9)
+        pose.landmark[16] = NS(x=0.8, y=0.4, visibility=0.9)
+        result = NS(pose_landmarks=pose, pose_world_landmarks=None,
+                    left_hand_landmarks=left, right_hand_landmarks=right)
+        filtered = reject_duplicate_hands(result, 640, 480)
+        self.assertIs(filtered.left_hand_landmarks, left)
+        self.assertIsNone(filtered.right_hand_landmarks)
+        self.assertEqual(make_packet(filtered, 640, 480)['rightHand'], [])
+        # Reverse the wrist evidence: right hand must win symmetrically.
+        pose.landmark[15], pose.landmark[16] = pose.landmark[16], pose.landmark[15]
+        filtered = reject_duplicate_hands(result, 640, 480)
+        self.assertIsNone(filtered.left_hand_landmarks)
+        self.assertIs(filtered.right_hand_landmarks, right)
+        # Without reliable wrist evidence neither label is trustworthy.
+        pose.landmark[16].visibility = 0.1
+        filtered = reject_duplicate_hands(result, 640, 480)
+        self.assertIsNone(filtered.left_hand_landmarks)
+        self.assertIsNone(filtered.right_hand_landmarks)
+        # Distinct hands remain, even when wrists are unreliable.
+        result.right_hand_landmarks = hand(0.7)
+        self.assertIs(reject_duplicate_hands(result, 640, 480), result)
+        # Nearby/crossed wrists with different finger shapes are not duplicates.
+        result.right_hand_landmarks = hand(0.2)
+        for point in result.right_hand_landmarks.landmark[1:]:
+            point.y += 0.1
+        self.assertIs(reject_duplicate_hands(result, 640, 480), result)
 
     def test_real_inference_without_person_emits_empty_arrays(self):
         tracker = BodyTracker()
