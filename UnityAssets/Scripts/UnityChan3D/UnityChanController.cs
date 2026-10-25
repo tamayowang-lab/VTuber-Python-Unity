@@ -215,11 +215,24 @@ public class UnityChanController : MonoBehaviour, ISaveable
         lastFaceTime = Time.time;
     }
 
+    static bool GazeCalibrationPressed()
+    {
+#if ENABLE_INPUT_SYSTEM
+        var keyboard = UnityEngine.InputSystem.Keyboard.current;
+        return keyboard != null && keyboard.gKey.wasPressedThisFrame;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+        return UnityEngine.Input.GetKeyDown(KeyCode.G);
+#else
+        // Calibration remains available through the component context menu.
+        return false;
+#endif
+    }
+
     // Update is called once per frame
     void Update()
     {
         ConsumeFace();
-        if (Input.GetKeyDown(KeyCode.G)) RecalibrateEyes();
+        if (GazeCalibrationPressed()) RecalibrateEyes();
         print(string.Format("Roll: {0:F}; Pitch: {1:F}; Yaw: {2:F}", roll, pitch, yaw));
         // print(string.Format("Left eye: {0:F}, {1:F}; Right eye: {2:F}, {3:F}",
         //     x_ratio_left, y_ratio_left, x_ratio_right, y_ratio_right));
