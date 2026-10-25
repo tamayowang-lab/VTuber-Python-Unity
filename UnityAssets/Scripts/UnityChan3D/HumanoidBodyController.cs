@@ -47,6 +47,7 @@ public class HumanoidBodyController : MonoBehaviour
     volatile bool stopping;
     Packet pending;
     Packet current;
+    bool trackingActive;
     string networkError;
     float lastPacket = float.NegativeInfinity;
     Quaternion restTorsoFrame;
@@ -262,10 +263,22 @@ public class HumanoidBodyController : MonoBehaviour
             if (pending != null) { current = pending; pending = null; lastPacket = Time.time; }
             if (networkError != null) { Debug.LogWarning(networkError, this); networkError = null; }
         }
+        // No input means no ownership of the skeleton. Writing the rest pose
+        // here fights Animator/IK every frame, even before Python connects.
         if (current == null || Time.time - lastPacket > trackingTimeout)
         {
-            foreach (HumanBodyBones id in bones.Keys) ResetBone(id);
+            trackingActive = false;
             return;
+        }
+        if (!trackingActive)
+        {
+            // Start/reconnect from the actual animated pose, not an old target.
+            foreach (Bone bone in bones.Values)
+            {
+                bone.filteredRotation = Quaternion.Inverse(transform.rotation) * bone.transform.rotation;
+                bone.lastTracked = float.NegativeInfinity;
+            }
+            trackingActive = true;
         }
         Point[] p = current.pose;
         if (Visible(p, 11, 12, 23, 24))
