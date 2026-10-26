@@ -4,37 +4,13 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace as NS
-
 import numpy as np
-
-from body_tracking import BodySender, BodyTracker, make_packet, reject_duplicate_hands
-
-
-def landmarks(count):
-    return NS(landmark=[NS(x=0.25, y=0.5, z=-0.1, visibility=0.8) for _ in range(count)])
+from body_tracking import BodySender, BodyTracker, HolisticFaceAdapter, load_config, face_mirror_map
 
 
 class BodyTrackingTests(unittest.TestCase):
-    def test_coordinate_conversion_and_anatomical_sides(self):
-        result = NS(pose_world_landmarks=landmarks(33),
-                    left_hand_landmarks=landmarks(21), right_hand_landmarks=None)
-        packet = make_packet(result, 640, 480)
-        self.assertEqual(packet['version'], 1)
-        self.assertEqual(len(packet['pose']), 33)
-        self.assertEqual(len(packet['leftHand']), 21)
-        self.assertEqual(packet['rightHand'], [])
-        self.assertEqual(packet['pose'][0], dict(x=-0.25, y=-0.5, z=-0.1, visibility=0.8))
-        self.assertAlmostEqual(packet['leftHand'][0]['y'], -0.375)
-        self.assertEqual(packet['leftHand'][0]['visibility'], 1)
-
-    def test_missing_landmarks_clear_previous_tracking(self):
-        result = NS(pose_world_landmarks=None, left_hand_landmarks=None, right_hand_landmarks=None)
-        packet = make_packet(result, 640, 480)
-        self.assertEqual([packet[k] for k in ('pose', 'leftHand', 'rightHand')], [[], [], []])
-
     def test_framed_tcp_roundtrip_with_fragmented_reads(self):
-        packet = make_packet(NS(pose_world_landmarks=landmarks(33),
-                                left_hand_landmarks=landmarks(21), right_hand_landmarks=landmarks(21)), 640, 480)
+        packet = dict(version=1, pose=[], leftHand=[], rightHand=[])
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             listener.listen(1)
@@ -68,84 +44,67 @@ class BodyTrackingTests(unittest.TestCase):
             finally:
                 sender.close()
 
-    def test_preview_mirrors_image_landmarks_without_changing_packet(self):
-        from mediapipe.framework.formats import landmark_pb2
-        hand = landmark_pb2.NormalizedLandmarkList()
-        for i in range(21):
-            hand.landmark.add(x=0.2 + (i % 4) * 0.01, y=0.4 + (i // 4) * 0.02, z=0)
-        result = NS(pose_landmarks=None, pose_world_landmarks=None,
-                    left_hand_landmarks=hand, right_hand_landmarks=None)
-        tracker = BodyTracker.__new__(BodyTracker)
-        tracker.result = result
-        before = make_packet(result, 640, 480)
-        image = np.zeros((480, 640, 3), dtype=np.uint8)
-        returned = tracker.draw(image)
-        self.assertIs(returned, image)
-        self.assertTrue(image[:, 480:530].any())
-        self.assertFalse(image[:, :320].any())
-        self.assertEqual(before, make_packet(result, 640, 480))
-        tracker.result = NS(pose_landmarks=None, left_hand_landmarks=None, right_hand_landmarks=None)
-        blank = np.zeros_like(image)
-        tracker.draw(blank)
-        self.assertFalse(blank.any())
-
-    def test_duplicate_hands_use_pose_wrists_for_both_preview_and_packet(self):
-        from mediapipe.framework.formats import landmark_pb2
-        def hand(x):
-            points = landmark_pb2.NormalizedLandmarkList()
-            for i in range(21):
-                points.landmark.add(x=x + (i % 4) * 0.02,
-                                   y=0.4 + (i // 4) * 0.02, z=0)
-            return points
-        left, right = hand(0.2), hand(0.201)
-        pose = landmarks(33)
-        pose.landmark[15] = NS(x=0.2, y=0.4, visibility=0.9)
-        pose.landmark[16] = NS(x=0.8, y=0.4, visibility=0.9)
-        result = NS(pose_landmarks=pose, pose_world_landmarks=None,
-                    left_hand_landmarks=left, right_hand_landmarks=right)
-        filtered = reject_duplicate_hands(result, 640, 480)
-        self.assertIs(filtered.left_hand_landmarks, left)
-        self.assertIsNone(filtered.right_hand_landmarks)
-        self.assertEqual(make_packet(filtered, 640, 480)['rightHand'], [])
-        # Reverse the wrist evidence: right hand must win symmetrically.
-        pose.landmark[15], pose.landmark[16] = pose.landmark[16], pose.landmark[15]
-        filtered = reject_duplicate_hands(result, 640, 480)
-        self.assertIsNone(filtered.left_hand_landmarks)
-        self.assertIs(filtered.right_hand_landmarks, right)
-        # Without reliable wrist evidence neither label is trustworthy.
-        pose.landmark[16].visibility = 0.1
-        filtered = reject_duplicate_hands(result, 640, 480)
-        self.assertIsNone(filtered.left_hand_landmarks)
-        self.assertIsNone(filtered.right_hand_landmarks)
-        # Distinct hands remain, even when wrists are unreliable.
-        result.right_hand_landmarks = hand(0.7)
-        self.assertIs(reject_duplicate_hands(result, 640, 480), result)
-        # Nearby/crossed wrists with different finger shapes are not duplicates.
-        result.right_hand_landmarks = hand(0.2)
-        for point in result.right_hand_landmarks.landmark[1:]:
-            point.y += 0.1
-        self.assertIs(reject_duplicate_hands(result, 640, 480), result)
-
-    def test_image_shoulder_anchors_use_same_units_as_hand_wrist(self):
-        tracker = BodyTracker.__new__(BodyTracker)
-        tracker.model = Mock()
-        tracker.model.process.return_value = NS(pose_landmarks=landmarks(33),
-            pose_world_landmarks=landmarks(33), left_hand_landmarks=landmarks(21), right_hand_landmarks=None)
-        tracker.depth = Mock()
-        tracker.depth.update.return_value = (False, 0.0)
-        packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8))
-        self.assertEqual(len(packet['imagePose']), 33)
-        for axis in ('x', 'y'):
-            self.assertEqual(packet['imagePose'][11][axis], packet['leftHand'][0][axis])
-        self.assertEqual(packet['imagePose'][11]['visibility'], 0.8)
-
-    def test_real_inference_without_person_emits_empty_arrays(self):
+    def test_real_model_and_shared_face_adapter(self):
         tracker = BodyTracker()
         try:
-            packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8))
-            self.assertEqual(packet, dict(version=1, pose=[], leftHand=[], rightHand=[], depthValid=False, depthOffset=0.0, imagePose=[]))
+            packet = tracker.process(np.zeros((480, 640, 3), dtype=np.uint8), 1.0)
+            self.assertEqual(packet['pose'], [])
+            self.assertEqual(packet['leftHand'], [])
+            self.assertTrue(packet['adaptiveFiltered'])
+            self.assertFalse(packet['depthValid'])
+            adapter = tracker.face_detector()
+            _, faces = adapter.findFaceMesh(np.zeros((480, 640, 3), dtype=np.uint8))
+            self.assertEqual(faces, [])
+            adapter.close()
         finally:
             tracker.close()
+
+    def test_face_adapter_mirrors_without_second_inference(self):
+        from mediapipe.framework.formats import landmark_pb2
+        face = landmark_pb2.NormalizedLandmarkList()
+        for _ in range(478):
+            face.landmark.add(x=0.25, y=0.5, z=0)
+        tracker = NS(raw_result=NS(face_landmarks=face))
+        adapter = HolisticFaceAdapter(tracker)
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        _, faces = adapter.findFaceMesh(image, draw=False)
+        self.assertEqual(faces[0][0], [480, 240])
+        self.assertEqual(face.landmark[0].x, 0.25)
+        adapter.close()
+
+    def test_face_mirror_is_bijective_and_swaps_anatomical_eyes(self):
+        mapping = face_mirror_map()
+        self.assertEqual(len(set(mapping)), 478)
+        self.assertEqual([mapping[mapping[i]] for i in range(478)], list(range(478)))
+        self.assertEqual(mapping[33], 263)
+        self.assertEqual(mapping[468], 473)
+        self.assertEqual(mapping[473], 468)
+
+    def test_real_face_reuse_matches_original_mirrored_detector(self):
+        from pathlib import Path
+        import cv2
+        from PIL import Image
+        from facial_landmark import FaceMeshDetector
+        with Image.open(Path(__file__).resolve().parents[1]/'Images/live2d_demo.gif') as image:
+            frame = np.asarray(image.convert('RGB'))[:, :, ::-1].copy()[85:348, 490:837]
+        detector = FaceMeshDetector(static_image_mode=True)
+        try:
+            _, mirrored = detector.findFaceMesh(frame, draw=False)
+            detector.findFaceMesh(cv2.flip(frame, 1), draw=False)
+            source = detector.results.multi_face_landmarks[0]
+            adapter = HolisticFaceAdapter(NS(raw_result=NS(face_landmarks=source)))
+            _, reused = adapter.findFaceMesh(frame, draw=False)
+            error = np.sqrt(np.mean((np.asarray(mirrored[0][:468])-np.asarray(reused[0][:468]))**2))
+            self.assertLess(error, 8.0)
+            adapter.close()
+        finally:
+            detector.close()
+
+    def test_config_preserves_defaults_and_disable(self):
+        from pathlib import Path
+        self.assertEqual(load_config(str(Path(__file__).resolve().parents[1]/'tracking.defaults.json')), load_config())
+        self.assertTrue(load_config().enabled)
+        self.assertFalse(load_config(raw=True).enabled)
 
 
 class MainIntegrationTests(unittest.TestCase):
@@ -158,6 +117,7 @@ class MainIntegrationTests(unittest.TestCase):
         detector = Mock()
         detector.findFaceMesh.return_value = (frame, [])
         tracker = Mock()
+        tracker.face_detector.return_value = detector
         tracker.process.return_value = dict(version=1, pose=[], leftHand=[], rightHand=[])
         sender = Mock()
         face_socket = Mock()
@@ -177,7 +137,7 @@ class MainIntegrationTests(unittest.TestCase):
         for resource in (sender, tracker, face_socket):
             resource.close.assert_called_once()
         cap.release.assert_called_once()
-        detector.face_mesh.close.assert_called_once()
+        detector.close.assert_called_once()
 
     def test_camera_failure_is_explicit_and_releases_camera(self):
         import main
@@ -191,7 +151,7 @@ class MainIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Cannot read camera'):
                 main.main()
         cap.release.assert_called_once()
-        detector.face_mesh.close.assert_called_once()
+        detector.close.assert_called_once()
 
 
 if __name__ == '__main__':

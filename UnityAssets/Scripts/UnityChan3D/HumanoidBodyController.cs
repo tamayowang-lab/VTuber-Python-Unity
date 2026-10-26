@@ -17,7 +17,7 @@ public class HumanoidBodyController : MonoBehaviour
     public float smoothing = 8f;
     [Tooltip("Reverse camera depth so reaching toward the camera moves toward the avatar front.")]
     public bool invertDepth = true;
-    [Min(1)] public float maximumAngularSpeed = 240f;
+    [Min(1)] public float maximumAngularSpeed = 720f;
     [Range(0, 5)] public float rotationDeadZone = 1f;
     [Min(0)] public float occlusionGracePeriod = 0.4f;
     public bool returnToRestWhenLost = true;
@@ -28,6 +28,10 @@ public class HumanoidBodyController : MonoBehaviour
     [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
     public bool requireHandForArmTracking = false;
     public bool inferArmFromHand = true;
+    [Range(1, 80)] public float minimumElbowBend = 15f;
+    [Range(81, 170)] public float maximumElbowBend = 150f;
+    public bool drawTrackingGizmos = true;
+    [SerializeField] bool leftArmInferred, rightArmInferred;
     public bool limitElbowInward = true;
     [Tooltip("Minimum elbow distance from the torso midline, as a fraction of shoulder width. Higher keeps elbows farther out.")]
     [Range(0, 0.65f)] public float elbowSideClearance = 0.35f;
@@ -35,6 +39,7 @@ public class HumanoidBodyController : MonoBehaviour
     [Tooltip("With hips out of view, estimate torso turn/side tilt from shoulders only; forward lean needs hips.")]
     public bool allowShoulderOnlyTorso = true;
     [Min(0)] public float fingerSmoothing = 5f;
+    [Range(15, 150)] public float maximumFingerJointRotation = 100f;
     public enum DepthMotionMode { Disabled, UpperBodyLean, WholeAvatar }
     [Tooltip("UpperBodyLean preserves the fixed pelvis; WholeAvatar moves the model root.")]
     public DepthMotionMode depthMotion = DepthMotionMode.Disabled;
@@ -53,6 +58,7 @@ public class HumanoidBodyController : MonoBehaviour
     {
         public int version;
         public Point[] pose, leftHand, rightHand, imagePose;
+        public bool adaptiveFiltered;
         public bool depthValid;
         public float depthOffset;
     }
@@ -68,9 +74,12 @@ public class HumanoidBodyController : MonoBehaviour
     class ArmGeometry
     {
         public float upperLength, lowerLength;
+        public Vector3 lastPole;
     }
     readonly Dictionary<bool, ArmGeometry> armGeometry = new Dictionary<bool, ArmGeometry>();
     float avatarShoulderSpan;
+    readonly Vector3[] debugShoulder = new Vector3[2], debugElbow = new Vector3[2], debugWrist = new Vector3[2];
+    readonly bool[] debugValid = new bool[2];
     readonly Dictionary<HumanBodyBones, Bone> bones = new Dictionary<HumanBodyBones, Bone>();
     readonly object gate = new object();
     TcpListener listener;
@@ -200,7 +209,8 @@ public class HumanoidBodyController : MonoBehaviour
                 upperLength = (transform.InverseTransformPoint(lowerTransform.position)
                     - transform.InverseTransformPoint(upperTransform.position)).magnitude,
                 lowerLength = (transform.InverseTransformPoint(handTransform.position)
-                    - transform.InverseTransformPoint(lowerTransform.position)).magnitude };
+                    - transform.InverseTransformPoint(lowerTransform.position)).magnitude,
+                lastPole = new Vector3(left ? -0.5f : 0.5f, -1, 0.5f) };
         Transform wrist = animator.GetBoneTransform(hand);
         Transform index = animator.GetBoneTransform(fingers[3]);
         Transform little = animator.GetBoneTransform(fingers[12]);
@@ -355,10 +365,17 @@ public class HumanoidBodyController : MonoBehaviour
     // This lets a held arm follow its parent torso without snapping or drifting.
     void ApplyLocal(Bone bone, Quaternion target, float deltaTime, bool deadZone)
     {
+        // Generic rigs do not expose a shared finger hinge axis. A bind-relative
+        // rotation cone is a conservative safety bound, not a fitted anatomy model.
+        if (bone.finger) target = Quaternion.RotateTowards(bone.restLocal, target, maximumFingerJointRotation);
         if (!deadZone || Quaternion.Angle(bone.filteredLocal, target) > rotationDeadZone)
         {
             float response = bone.finger ? fingerSmoothing : smoothing;
-            float blend = response <= 0 ? 1 : 1f - Mathf.Exp(-response * deltaTime);
+            // Python already applies adaptive landmark filtering. Do not stack
+            // a second slow exponential filter on measured poses. Rest blending
+            // and the angular speed safety bound remain independent.
+            bool adaptive = deadZone && current != null && current.adaptiveFiltered;
+            float blend = adaptive || response <= 0 ? 1 : 1f - Mathf.Exp(-response * deltaTime);
             Quaternion smooth = Quaternion.Slerp(bone.filteredLocal, target, blend);
             bone.filteredLocal = Quaternion.RotateTowards(bone.filteredLocal, smooth,
                 Mathf.Max(1, maximumAngularSpeed) * deltaTime);
@@ -454,6 +471,8 @@ public class HumanoidBodyController : MonoBehaviour
         // to maintain the requested relaxed rest pose from our cached filter.
         if (!live)
         {
+            debugValid[0] = debugValid[1] = false;
+            leftArmInferred = rightArmInferred = false;
             trackingActive = false;
             torsoTracking = false;
             foreach (Bone bone in bones.Values) bone.ownsPose = false;
@@ -488,17 +507,17 @@ public class HumanoidBodyController : MonoBehaviour
         HumanBodyBones lower = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         HumanBodyBones palm = left ? HumanBodyBones.LeftHand : HumanBodyBones.RightHand;
         HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
-        bool handPresent = hand != null && hand.Length == 21;
+        debugValid[left ? 0 : 1] = false;
+        bool handPresent = hand != null && hand.Length == 21 && hand[0].visibility >= minimumVisibility;
         bool armReliable = (!requireHandForArmTracking || handPresent)
             && Visible(p, shoulder, elbow, wrist);
         bool inferred = !armReliable && handPresent && inferArmFromHand
             && TryInferArm(left, current == null ? null : current.imagePose, hand);
-        if (armReliable)
-        {
-            DriveTrackedArm(left, TrackingPosition(p[elbow]) - TrackingPosition(p[shoulder]),
-                TrackingPosition(p[wrist]) - TrackingPosition(p[elbow]));
-        }
-        else if (!inferred)
+        bool driven = armReliable && DriveTrackedArm(left,
+            TrackingPosition(p[elbow]) - TrackingPosition(p[shoulder]),
+            TrackingPosition(p[wrist]) - TrackingPosition(p[elbow]));
+        if (left) leftArmInferred = inferred; else rightArmInferred = inferred;
+        if (!driven && !inferred)
         {
             HoldOrResetBone(upper);
             HoldOrResetBone(lower);
@@ -518,7 +537,9 @@ public class HumanoidBodyController : MonoBehaviour
         Vector3 palmUp = TrackingPosition(hand[9]) - TrackingPosition(hand[0]);
         Bone palmBone;
         Quaternion restFrame;
-        bool palmReliable = palmUp.sqrMagnitude > 1e-8f
+        bool palmReliable = hand[0].visibility >= minimumVisibility
+            && hand[5].visibility >= minimumVisibility && hand[9].visibility >= minimumVisibility
+            && hand[17].visibility >= minimumVisibility && palmUp.sqrMagnitude > 1e-8f
             && Vector3.Cross(palmRight, palmUp).sqrMagnitude > 1e-10f;
         if (palmReliable && bones.TryGetValue(palm, out palmBone) && restPalmFrames.TryGetValue(left, out restFrame))
             Rotate(palmBone, Frame(palmRight, palmUp) * Quaternion.Inverse(restFrame) * palmBone.restRotation);
@@ -535,33 +556,6 @@ public class HumanoidBodyController : MonoBehaviour
                 else ResetBone(id);
             }
         }
-    }
-
-    // Analytic two-bone IK with fixed bone lengths. The wrist target is
-    // projected from the image, NOT assigned the hand model's relative z.
-    public static bool SolveInferredArm(Vector3 shoulder, Vector3 desiredWrist,
-        float upperLength, float lowerLength, Vector3 pole, out Vector3 elbow, out Vector3 wrist)
-    {
-        elbow = wrist = shoulder;
-        if (upperLength < 1e-5f || lowerLength < 1e-5f) return false;
-        Vector3 delta = desiredWrist - shoulder;
-        float total = upperLength + lowerLength;
-        if (delta.sqrMagnitude < 1e-10f) return false;
-        Vector3 direction = delta.normalized;
-        float minimumReach = Mathf.Abs(upperLength - lowerLength) + total * 0.05f;
-        float maximumReach = total * 0.95f;
-        if (minimumReach >= maximumReach) return false;
-        float distance = Mathf.Clamp(delta.magnitude, minimumReach, maximumReach);
-        wrist = shoulder + direction * distance;
-        Vector3 bend = Vector3.ProjectOnPlane(pole, direction);
-        if (bend.sqrMagnitude < 1e-8f) bend = Vector3.ProjectOnPlane(Vector3.forward, direction);
-        if (bend.sqrMagnitude < 1e-8f) bend = Vector3.ProjectOnPlane(Vector3.right, direction);
-        bend.Normalize();
-        float along = (upperLength * upperLength - lowerLength * lowerLength + distance * distance)
-            / (2f * distance);
-        float height = Mathf.Sqrt(Mathf.Max(0, upperLength * upperLength - along * along));
-        elbow = shoulder + direction * along + bend * height;
-        return true;
     }
 
     bool TryInferArm(bool left, Point[] imagePose, Point[] hand)
@@ -586,63 +580,29 @@ public class HumanoidBodyController : MonoBehaviour
         float side = left ? -1f : 1f;
         delta.x = side * Mathf.Clamp(side * delta.x, -total * 0.25f, total * 0.95f);
         delta.y = Mathf.Clamp(delta.y, -total * 0.95f, total * 0.9f);
-        Vector3 elbow, wrist;
-        if (!SolveInferredArm(shoulder, shoulder + delta, geometry.upperLength, geometry.lowerLength,
-            new Vector3(side * 0.5f, -1, 0.5f), out elbow, out wrist)) return false;
-        DriveArmTargets(left, shoulder, elbow, wrist, geometry);
-        return true;
+        Vector3 target = shoulder + delta;
+        return DriveArmTargets(left, shoulder, target, shoulder + new Vector3(side*0.3f, -0.3f, 0.2f), geometry);
     }
 
-    void DriveTrackedArm(bool left, Vector3 upperDirection, Vector3 lowerDirection)
+    bool DriveTrackedArm(bool left, Vector3 upperDirection, Vector3 lowerDirection)
     {
         HumanBodyBones upperId = left ? HumanBodyBones.LeftUpperArm : HumanBodyBones.RightUpperArm;
-        HumanBodyBones lowerId = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         ArmGeometry geometry;
         Bone upper;
-        if (!armGeometry.TryGetValue(left, out geometry) || !bones.TryGetValue(upperId, out upper))
-        {
-            Aim(upperId, upperDirection);
-            Aim(lowerId, lowerDirection);
-            return;
-        }
-        if (upperDirection.sqrMagnitude < 1e-10f || lowerDirection.sqrMagnitude < 1e-10f)
-        {
-            HoldOrResetBone(upperId); HoldOrResetBone(lowerId);
-            return;
-        }
+        if (!armGeometry.TryGetValue(left, out geometry) || !bones.TryGetValue(upperId, out upper)) return false;
+        float humanLength = upperDirection.magnitude + lowerDirection.magnitude;
+        if (humanLength < 1e-5f || upperDirection.sqrMagnitude < 1e-10f || lowerDirection.sqrMagnitude < 1e-10f) return false;
         Vector3 shoulder = transform.InverseTransformPoint(upper.transform.position);
-        Vector3 elbow = shoulder + upperDirection.normalized * geometry.upperLength;
-        Vector3 wrist = elbow + lowerDirection.normalized * geometry.lowerLength;
-        DriveArmTargets(left, shoulder, elbow, wrist, geometry);
-    }
-
-    // Project an inward elbow outward without stretching either bone.
-    // Wrist placement is adjusted when exact contact conflicts with clearance.
-    public static bool ConstrainElbow(Vector3 shoulder, Vector3 elbow, Vector3 wrist,
-        Vector3 torsoCenter, Vector3 torsoRight, bool left, float clearance,
-        float upperLength, float lowerLength, out Vector3 safeElbow, out Vector3 safeWrist)
-    {
-        safeElbow = elbow; safeWrist = wrist;
-        if (upperLength < 1e-5f || lowerLength < 1e-5f || torsoRight.sqrMagnitude < 1e-8f) return false;
-        Vector3 outward = torsoRight.normalized * (left ? -1f : 1f);
-        Vector3 direction = elbow - shoulder;
-        if (direction.sqrMagnitude < 1e-10f) return false;
-        direction.Normalize();
-        float minimum = Mathf.Clamp((clearance - Vector3.Dot(shoulder - torsoCenter, outward))
-            / upperLength, -0.95f, 0.95f);
-        float actual = Vector3.Dot(direction, outward);
-        if (actual < minimum)
-        {
-            Vector3 tangent = Vector3.ProjectOnPlane(direction, outward);
-            if (tangent.sqrMagnitude < 1e-8f) tangent = Vector3.ProjectOnPlane(Vector3.down, outward);
-            if (tangent.sqrMagnitude < 1e-8f) tangent = Vector3.ProjectOnPlane(Vector3.forward, outward);
-            direction = outward * minimum + tangent.normalized * Mathf.Sqrt(1 - minimum * minimum);
-        }
-        safeElbow = shoulder + direction * upperLength;
-        Vector3 forearm = wrist - safeElbow;
-        if (forearm.sqrMagnitude < 1e-10f) forearm = direction;
-        safeWrist = safeElbow + forearm.normalized * lowerLength;
-        return true;
+        // Scale the HUMAN shoulder-relative wrist target to avatar reach.
+        // Scaling each segment separately changes the measured wrist trajectory.
+        float scale = (geometry.upperLength + geometry.lowerLength)/humanLength;
+        Vector3 hint = shoulder + upperDirection*scale;
+        Vector3 target = shoulder + (upperDirection+lowerDirection)*scale;
+        Vector3 axis = (target-shoulder).normalized;
+        Vector3 bend = Vector3.ProjectOnPlane(hint-shoulder, axis);
+        if (bend.magnitude > geometry.upperLength*0.12f) geometry.lastPole = bend.normalized;
+        else hint = shoulder + geometry.lastPole*geometry.upperLength; // Stable near straight arms.
+        return DriveArmTargets(left, shoulder, target, hint, geometry);
     }
 
     bool ElbowFrame(out Vector3 center, out Vector3 right, out float clearance)
@@ -660,40 +620,52 @@ public class HumanoidBodyController : MonoBehaviour
         return true;
     }
 
-    void DriveArmTargets(bool left, Vector3 shoulder, Vector3 elbow, Vector3 wrist, ArmGeometry geometry)
+    bool DriveArmTargets(bool left, Vector3 shoulder, Vector3 target, Vector3 hint, ArmGeometry geometry)
     {
         HumanBodyBones upperId = left ? HumanBodyBones.LeftUpperArm : HumanBodyBones.RightUpperArm;
         HumanBodyBones lowerId = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         Vector3 center = Vector3.zero, right = Vector3.zero;
         float clearance = 0;
         bool constrain = limitElbowInward && ElbowFrame(out center, out right, out clearance);
-        // Explicit defaults keep these initialized when the optional limit is off.
-        if (!constrain) { center = right = Vector3.zero; clearance = 0; }
-        else ConstrainElbow(shoulder, elbow, wrist, center, right, left, clearance,
-            geometry.upperLength, geometry.lowerLength, out elbow, out wrist);
-        Aim(upperId, elbow - shoulder);
+        ArmRetargeting.Limits limits = new ArmRetargeting.Limits { enabled = constrain, left = left,
+            center = center, right = right, clearance = clearance,
+            minimumBend = minimumElbowBend, maximumBend = maximumElbowBend };
+        Vector3 elbow, wrist;
+        if (!ArmRetargeting.Solve(shoulder, target, geometry.upperLength, geometry.lowerLength,
+            hint, geometry.lastPole, limits, out elbow, out wrist)) return false;
+        Aim(upperId, elbow-shoulder);
         Bone lower, upper;
-        if (bones.TryGetValue(lowerId, out lower) && bones.TryGetValue(upperId, out upper))
+        if (!bones.TryGetValue(lowerId, out lower) || !bones.TryGetValue(upperId, out upper)) return false;
+        Vector3 actualElbow = transform.InverseTransformPoint(lower.transform.position);
+        if (constrain && Vector3.Dot(actualElbow-center, right.normalized*(left ? -1 : 1)) < clearance)
         {
-            Vector3 actualElbow = transform.InverseTransformPoint(lower.transform.position);
-            if (constrain)
+            Vector3 correction, adjustedWrist;
+            if (ArmRetargeting.Solve(shoulder, wrist, geometry.upperLength, geometry.lowerLength,
+                actualElbow, geometry.lastPole, limits, out correction, out adjustedWrist))
             {
-                // Enforce the boundary on the filtered pose too, rather than
-                // allowing a smoothing transition to pass through the chest.
-                Vector3 correctedElbow, unusedWrist;
-                if (ConstrainElbow(shoulder, actualElbow, wrist, center, right, left, clearance,
-                    geometry.upperLength, geometry.lowerLength, out correctedElbow, out unusedWrist))
-                {
-                    Vector3 from = transform.TransformDirection(actualElbow - shoulder);
-                    Vector3 to = transform.TransformDirection(correctedElbow - shoulder);
-                    upper.transform.rotation = Quaternion.FromToRotation(from, to) * upper.transform.rotation;
-                    upper.filteredLocal = upper.transform.localRotation;
-                    actualElbow = transform.InverseTransformPoint(lower.transform.position);
-                }
+                upper.transform.rotation = Quaternion.FromToRotation(transform.TransformDirection(actualElbow-shoulder),
+                    transform.TransformDirection(correction-shoulder))*upper.transform.rotation;
+                upper.filteredLocal = upper.transform.localRotation;
+                actualElbow = transform.InverseTransformPoint(lower.transform.position);
             }
-            Aim(lowerId, wrist - actualElbow);
         }
-        else Aim(lowerId, wrist - elbow);
+        Aim(lowerId, wrist-actualElbow);
+        int side = left ? 0 : 1;
+        debugShoulder[side] = shoulder; debugElbow[side] = elbow; debugWrist[side] = wrist; debugValid[side] = true;
+        return true;
+    }
+
+    void OnDrawGizmosSelected()
+    {
+        if (!drawTrackingGizmos) return;
+        for (int i = 0; i < 2; i++)
+        {
+            if (!debugValid[i]) continue;
+            Gizmos.color = i == 0 ? Color.cyan : Color.yellow;
+            Gizmos.DrawLine(transform.TransformPoint(debugShoulder[i]), transform.TransformPoint(debugElbow[i]));
+            Gizmos.DrawLine(transform.TransformPoint(debugElbow[i]), transform.TransformPoint(debugWrist[i]));
+            Gizmos.DrawWireSphere(transform.TransformPoint(debugWrist[i]), 0.02f);
+        }
     }
 
     bool FingerReliable(Point[] hand, int finger, float palmSize)
@@ -703,6 +675,7 @@ public class HumanoidBodyController : MonoBehaviour
         for (int segment = 0; segment < 3; segment++)
         {
             int start = 1 + finger * 4 + segment;
+            if (hand[start].visibility < minimumVisibility || hand[start+1].visibility < minimumVisibility) return false;
             float length = (TrackingPosition(hand[start + 1]) - TrackingPosition(hand[start])).magnitude;
             if (length < palmSize * 0.02f || length > palmSize * 1.2f) return false;
         }

@@ -1,0 +1,13 @@
+# Eye and head configuration
+
+For the flat `eye_L_old`/right-eye meshes, choose **Eye Drive Mode = Material Offset** and assign the dedicated **Left/Right Eye Renderer**. Leave the bone transform fields empty. Those transform fields are for true rotating eyeball bones; Automatic mode can discover a renderer from an assigned transform, but never rotates that mesh surface.
+
+Use material index 0 for a single material, texture property `_MainTex` for the shown Toon/Toon setup (some URP shaders use `_BaseMap`). The shader must actually sample the selected texture's scale/offset. A successful script run cannot prove shader support. No shared material assets or mesh transforms are modified by material mode; per-renderer offsets are restored when disabled/destroyed.
+
+For visible testing: Gaze Sensitivity (3,3), Maximum Eye UV Offset (0.08,0.06), Eye Smoothing 12. Check **Preview Eye Movement** to sweep without Python or blink gates. Disable preview afterwards. If the sweep does not move the iris, inspect renderer, material slot and shader support; increasing sensitivity cannot fix a shader ignoring offsets. Reduce travel toward (0.02,0.015) for normal use. Large texture offsets can wrap or expose atlas seams. Per-eye UV Direction can reverse a mirrored UV axis.
+
+Sensitivity multiplies iris displacement before clamping. Smaller Iris Horizontal/Vertical Range increases sensitivity; UV Offset determines actual material travel. Maximum Eye Yaw/Pitch controls bone rotation and cancels out of normalized UV travel. Eye Smoothing uses exponential interpolation: larger follows faster; there is no special center acceleration.
+
+Look straight ahead for first valid gaze sample; **G** in the focused Unity Game window recalibrates. Both new/legacy input systems are supported. Both eyes' usable iris measurements are averaged. Gaze Blink Threshold gates unreliable closed-eye iris data; adjust below your measured open-eye EAR. Ear Min/Max Threshold controls eyelid blend shapes independently (Min must remain below Max). Face debug output numbers 4/5 are the two EAR values. Small eye openings require lower thresholds; measure yours rather than assume universal values.
+
+Head: Invert Pitch unchecked, Invert Yaw and Invert Roll checked for the requested anatomical convention; Compensate Torso Motion checked. **C in the Python window** resets head/depth neutral, distinct from Unity's G. Head pose uses relative rotation matrices, not raw Rodrigues-vector components or a hard-coded neck orientation. Keep your authored neck pose neutral and disable competing head/eye LookAt scripts. Actual directions and eye shader behavior require visual checking on your avatar.

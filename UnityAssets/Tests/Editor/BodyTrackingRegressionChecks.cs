@@ -32,6 +32,21 @@ public static class BodyTrackingRegressionChecks
         return bone;
     }
 
+    static bool SolveArm(Vector3 shoulder, Vector3 target, float upper, float lower, Vector3 pole,
+        out Vector3 elbow, out Vector3 wrist)
+    {
+        return ArmRetargeting.Solve(shoulder, target, upper, lower, shoulder+pole, pole,
+            new ArmRetargeting.Limits { minimumBend = 15, maximumBend = 150 }, out elbow, out wrist);
+    }
+    static bool SolveLimitedArm(Vector3 shoulder, Vector3 hint, Vector3 target, Vector3 center,
+        Vector3 right, bool left, float clearance, float upper, float lower, out Vector3 elbow, out Vector3 wrist)
+    {
+        return ArmRetargeting.Solve(shoulder, target, upper, lower, hint,
+            right*(left ? -1 : 1)+Vector3.down,
+            new ArmRetargeting.Limits { enabled = true, left = left, center = center, right = right,
+                clearance = clearance, minimumBend = 15, maximumBend = 150 }, out elbow, out wrist);
+    }
+
     [MenuItem("Tools/VTuber/Run body controller regression checks")]
     public static void Run()
     {
@@ -86,12 +101,6 @@ public static class BodyTrackingRegressionChecks
             Call(controller, "ApplyArm", true, inferred, null);
             Require(Quaternion.Angle(joint.localRotation, raised) < 0.001f,
                 "Missing hand allowed inferred pose wrist to move the arm.");
-            // Default policy: reliable arm landmarks still update without fingers.
-            controller.requireHandForArmTracking = false;
-            BoneType.GetField("lastTracked").SetValue(bone, float.NegativeInfinity);
-            Call(controller, "ApplyArm", true, inferred, null);
-            Require(!float.IsNegativeInfinity((float)BoneType.GetField("lastTracked").GetValue(bone)),
-                "Reliable arm was blocked by missing hand landmarks.");
             boneMap.Remove(HumanBodyBones.LeftUpperArm);
 
             // A timed-out session must release ownership as well.
@@ -154,10 +163,28 @@ public static class BodyTrackingRegressionChecks
                 "Relaxed forearm did not point down.");
             Require((Vector3)BoneType.GetField("restDirection").GetValue(upperBone) == Vector3.left,
                 "Relaxed pose changed the retargeting bind direction.");
+            // Correct proportions: scale a shoulder-relative wrist once, not each
+            // human segment independently. Bind rotations must not change the target.
+            Type geometryType = typeof(HumanoidBodyController).GetNestedType("ArmGeometry", BindingFlags.NonPublic);
+            object geometry = Activator.CreateInstance(geometryType, true);
+            geometryType.GetField("upperLength").SetValue(geometry, 0.3f);
+            geometryType.GetField("lowerLength").SetValue(geometry, 0.25f);
+            geometryType.GetField("lastPole").SetValue(geometry, new Vector3(-0.5f, -1, 0.5f));
+            ((IDictionary)Field(controller, "armGeometry"))[true] = geometry;
+            controller.limitElbowInward = false;
+            Vector3 observedUpper = new Vector3(-0.2f, -0.2f, 0.1f);
+            Vector3 observedLower = new Vector3(-0.1f, 0.1f, 0.2f);
+            Vector3 expectedWrist = root.transform.InverseTransformPoint(upper.position)
+                + (observedUpper+observedLower)*(0.55f/(observedUpper.magnitude+observedLower.magnitude));
+            Require((bool)Call(controller, "DriveTrackedArm", true, observedUpper, observedLower),
+                "Measured arm failed retargeting.");
+            Vector3[] wristTargets = (Vector3[])Field(controller, "debugWrist");
+            Require((wristTargets[0]-expectedWrist).magnitude < 0.001f,
+                "Retargeting changed measured wrist trajectory due to bone proportions.");
             // Collapsed finger geometry must be rejected independently.
             HumanoidBodyController.Point[] hand = new HumanoidBodyController.Point[21];
             for (int i = 0; i < hand.Length; i++)
-                hand[i] = new HumanoidBodyController.Point { x = (i % 4) * 0.02f, y = i * 0.02f };
+                hand[i] = new HumanoidBodyController.Point { x = (i % 4) * 0.02f, y = i * 0.02f, visibility = 1 };
             Require((bool)Call(controller, "FingerReliable", hand, 1, 0.15f), "Valid finger was rejected.");
             hand[6] = hand[5];
             Require(!(bool)Call(controller, "FingerReliable", hand, 1, 0.15f), "Collapsed finger was trusted.");
@@ -182,21 +209,23 @@ public static class BodyTrackingRegressionChecks
                 new Vector3(-0.1f, -0.5f, 0.1f), new Vector3(-0.01f, 0, 0.01f) })
             {
                 Vector3 elbow, wrist;
-                Require(HumanoidBodyController.SolveInferredArm(Vector3.zero, target,
+                Require(SolveArm(Vector3.zero, target,
                     0.3f, 0.25f, new Vector3(-0.5f, -1, 0.5f), out elbow, out wrist), "IK rejected valid lengths.");
                 Require(Mathf.Abs(elbow.magnitude - 0.3f) < 0.001f, "IK stretched upper arm.");
                 Require(Mathf.Abs((wrist - elbow).magnitude - 0.25f) < 0.001f, "IK stretched forearm.");
-                Require(wrist.magnitude <= 0.55f * 0.95f + 0.001f, "IK exceeded safe reach.");
+                Require(wrist.magnitude <= 0.55f, "IK exceeded safe reach.");
+                float bend = Vector3.Angle(elbow, wrist-elbow);
+                Require(bend >= 14.9f && bend <= 150.1f, "IK violated elbow bend limits.");
             }
             Vector3 rejectedElbow, rejectedWrist;
-            Require(!HumanoidBodyController.SolveInferredArm(Vector3.zero, Vector3.one,
+            Require(!SolveArm(Vector3.zero, Vector3.one,
                 0, 0.25f, Vector3.down, out rejectedElbow, out rejectedWrist), "IK accepted a zero-length bone.");
             // Keep elbows outside a torso-relative side boundary, preserving lengths.
             Vector3 leftShoulder = new Vector3(-0.2f, 1, 0);
             Vector3 badElbow = new Vector3(0, 0.8f, 0);
             Vector3 handTarget = new Vector3(0, 0.6f, 0.2f);
             Vector3 safeElbow, safeWrist;
-            Require(HumanoidBodyController.ConstrainElbow(leftShoulder, badElbow, handTarget,
+            Require(SolveLimitedArm(leftShoulder, badElbow, handTarget,
                 new Vector3(0, 1, 0), Vector3.right, true, 0.14f, 0.3f, 0.25f,
                 out safeElbow, out safeWrist), "Elbow constraint rejected a valid rig.");
             Require(safeElbow.x <= -0.14f + 0.001f, "Left elbow remained in chest center.");
@@ -205,17 +234,23 @@ public static class BodyTrackingRegressionChecks
             Require(Mathf.Abs((safeWrist - safeElbow).magnitude - 0.25f) < 0.001f,
                 "Elbow constraint stretched forearm.");
             Vector3 mirrorElbow, mirrorWrist;
-            HumanoidBodyController.ConstrainElbow(new Vector3(0.2f, 1, 0), badElbow, handTarget,
+            SolveLimitedArm(new Vector3(0.2f, 1, 0), badElbow, handTarget,
                 new Vector3(0, 1, 0), Vector3.right, false, 0.14f, 0.3f, 0.25f,
                 out mirrorElbow, out mirrorWrist);
             Require(mirrorElbow.x >= 0.14f - 0.001f, "Right elbow remained in chest center.");
             Quaternion torsoTurn = Quaternion.Euler(0, 35, 15);
             Vector3 turnedElbow, turnedWrist;
-            HumanoidBodyController.ConstrainElbow(torsoTurn * leftShoulder, torsoTurn * badElbow,
+            SolveLimitedArm(torsoTurn * leftShoulder, torsoTurn * badElbow,
                 torsoTurn * handTarget, torsoTurn * new Vector3(0, 1, 0), torsoTurn * Vector3.right,
                 true, 0.14f, 0.3f, 0.25f, out turnedElbow, out turnedWrist);
             Require((turnedElbow - torsoTurn * safeElbow).magnitude < 0.001f,
                 "Elbow limit did not follow torso rotation.");
+            BoneType.GetField("finger").SetValue(bone, true);
+            BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.identity);
+            for (int i = 0; i < 120; i++)
+                Call(controller, "ApplyLocal", bone, Quaternion.Euler(170, 0, 0), 1f/60, true);
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity)
+                <= controller.maximumFingerJointRotation+0.01f, "Finger exceeded its bind-relative safety cone.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

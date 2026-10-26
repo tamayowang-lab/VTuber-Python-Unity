@@ -15,7 +15,6 @@ from facial_landmark import FaceMeshDetector
 
 # pose estimation and stablization
 from pose_estimator import PoseEstimator
-from stabilizer import Stabilizer
 from head_pose import HeadOrientation
 
 # Miscellaneous detections (eyes/ mouth...)
@@ -70,7 +69,7 @@ def print_debug_msg(args):
 def main():
 
     # use internal webcam/ USB camera
-    cap = cv2.VideoCapture(args.cam)
+    cap = cv2.VideoCapture(getattr(args, 'video', None) or args.cam)
 
     body_tracker = body_sender = detector = face_socket = None
     try:
@@ -80,8 +79,9 @@ def main():
         # cap = cv2.VideoCapture(url)
 
         if args.body:
-            from body_tracking import BodyTracker, BodySender
-            body_tracker = BodyTracker()
+            from body_tracking import BodyTracker, BodySender, load_config
+            body_tracker = BodyTracker(load_config(getattr(args, 'tracking_config', None),
+                getattr(args, 'raw_tracking', False), getattr(args, 'debug_tracking', False)))
             if args.connect:
                 try:
                     body_sender = BodySender(args.body_port)
@@ -89,7 +89,7 @@ def main():
                     raise RuntimeError("Start HumanoidBodyController in Unity on --body-port first")
 
         # Facemesh
-        detector = FaceMeshDetector()
+        detector = body_tracker.face_detector() if body_tracker else FaceMeshDetector()
 
         # get a sample frame for pose estimation img
         success, img = cap.read()
@@ -105,29 +105,6 @@ def main():
         # extra 10 points due to new attention model (in iris detection)
         iris_image_points = np.zeros((10, 2))
 
-        # Introduce scalar stabilizers for pose.
-        pose_stabilizers = [Stabilizer(
-            state_num=2,
-            measure_num=1,
-            cov_process=0.1,
-            cov_measure=0.1) for _ in range(6)]
-
-        # for eyes
-        eyes_stabilizers = [Stabilizer(
-            state_num=2,
-            measure_num=1,
-            cov_process=0.1,
-            cov_measure=0.1) for _ in range(6)]
-
-        # for mouth_dist
-        mouth_dist_stabilizer = Stabilizer(
-            state_num=2,
-            measure_num=1,
-            cov_process=0.1,
-            cov_measure=0.1
-        )
-
-
         # Initialize TCP connection
         if args.connect:
             face_socket = init_TCP()
@@ -140,7 +117,8 @@ def main():
                 break
 
             if body_tracker:
-                body_packet = body_tracker.process(img)
+                body_packet = body_tracker.process(img, cap.get(cv2.CAP_PROP_POS_MSEC)/1000
+                    if getattr(args, 'video', None) else None)
                 if body_sender:
                     body_sender.send(body_packet)
                 if args.debug:
@@ -181,52 +159,11 @@ def main():
                 ear_left = FacialFeatures.eye_aspect_ratio(image_points, Eyes.LEFT)
                 ear_right = FacialFeatures.eye_aspect_ratio(image_points, Eyes.RIGHT)
 
-                pose_eye = [ear_left, ear_right, x_ratio_left, y_ratio_left, x_ratio_right, y_ratio_right]
 
                 mar = FacialFeatures.mouth_aspect_ratio(image_points)
                 mouth_distance = FacialFeatures.mouth_distance(image_points)
 
-                # print("left eye: %.2f, %.2f" % (x_ratio_left, y_ratio_left))
-                # print("right eye: %.2f, %.2f" % (x_ratio_right, y_ratio_right))
-
-                # print("rvec (y) = (%f): " % (pose[0][1]))
-                # print("rvec (x, y, z) = (%f, %f, %f): " % (pose[0][0], pose[0][1], pose[0][2]))
-                # print("tvec (x, y, z) = (%f, %f, %f): " % (pose[1][0], pose[1][1], pose[1][2]))
-
-                # Stabilize the pose.
-                steady_pose = []
-                pose_np = np.array(pose).flatten()
-
-                for value, ps_stb in zip(pose_np, pose_stabilizers):
-                    ps_stb.update([value])
-                    steady_pose.append(ps_stb.state[0])
-
-                steady_pose = np.reshape(steady_pose, (-1, 3))
-
-                # stabilize the eyes value
-                steady_pose_eye = []
-                for value, ps_stb in zip(pose_eye, eyes_stabilizers):
-                    ps_stb.update([value])
-                    steady_pose_eye.append(ps_stb.state[0])
-
-                mouth_dist_stabilizer.update([mouth_distance])
-                steady_mouth_dist = mouth_dist_stabilizer.state[0]
-
-                # uncomment the rvec line to check the raw values
-                # print("rvec steady (x, y, z) = (%f, %f, %f): " % (steady_pose[0][0], steady_pose[0][1], steady_pose[0][2]))
-                # print("tvec steady (x, y, z) = (%f, %f, %f): " % (steady_pose[1][0], steady_pose[1][1], steady_pose[1][2]))
-
-                # calculate the roll/ pitch/ yaw
-                # roll: +ve when the axis pointing upward
-                # pitch: +ve when we look upward
-                # yaw: +ve when we look left
                 roll, pitch, yaw = head_orientation.angles(pose[0])
-
-                # print("Roll: %.2f, Pitch: %.2f, Yaw: %.2f" % (roll, pitch, yaw))
-                # print("left eye: %.2f, %.2f; right eye %.2f, %.2f"
-                #     % (steady_pose_eye[0], steady_pose_eye[1], steady_pose_eye[2], steady_pose_eye[3]))
-                # print("EAR_LEFT: %.2f; EAR_RIGHT: %.2f" % (ear_left, ear_right))
-                # print("MAR: %.2f; Mouth Distance: %.2f" % (mar, steady_mouth_dist))
 
                 # send info to unity
                 if args.connect:
@@ -245,11 +182,7 @@ def main():
                             mar, mouth_distance))
 
 
-                # pose_estimator.draw_annotation_box(img, pose[0], pose[1], color=(255, 128, 128))
-
-                # pose_estimator.draw_axis(img, pose[0], pose[1])
-
-                pose_estimator.draw_axes(img_facemesh, steady_pose[0], steady_pose[1])
+                pose_estimator.draw_axes(img_facemesh, pose[0], pose[1])
 
             else:
                 # reset our pose estimator
@@ -273,7 +206,7 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
         if detector:
-            detector.face_mesh.close()
+            detector.close()
         if face_socket:
             face_socket.close()
         if body_tracker:
@@ -306,6 +239,11 @@ if __name__ == "__main__":
                         help="also track torso, arms and fingers for a Humanoid avatar")
     parser.add_argument("--body-port", type=int, default=5067,
                         help="HumanoidBodyController TCP port (default: 5067)")
+
+    parser.add_argument("--tracking-config", help="JSON tracking configuration")
+    parser.add_argument("--raw-tracking", action="store_true", help="Disable adaptive landmark smoothing")
+    parser.add_argument("--debug-tracking", action="store_true", help="Show raw/filtered landmarks and identity states")
+    parser.add_argument("--video", help="Use a recorded video instead of the webcam")
 
     args = parser.parse_args()
 

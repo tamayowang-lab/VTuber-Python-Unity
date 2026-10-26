@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "min_cutoff": 1.2,
+  "beta": 2.0,
+  "finger_min_cutoff": 1.8,
+  "finger_beta": 2.5,
+  "derivative_cutoff": 1.0,
+  "min_visibility": 0.6,
+  "prediction_seconds": 0.08,
+  "identity_memory": 0.5,
+  "max_image_speed": 4.0,
+  "max_world_speed": 8.0,
+  "debug": false
+}

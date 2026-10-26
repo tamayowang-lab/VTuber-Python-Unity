@@ -72,6 +72,10 @@ class FaceMeshDetector:
         return img, self.faces
 
 
+    def close(self):
+        self.face_mesh.close()
+
+
 # sample run of the module
 def main():
 
