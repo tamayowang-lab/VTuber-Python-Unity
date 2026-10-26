@@ -28,6 +28,11 @@ public class HumanoidBodyController : MonoBehaviour
     [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
     public bool requireHandForArmTracking = false;
     public bool inferArmFromHand = true;
+    public bool limitWristBend = true;
+    [Tooltip("Extension from neutral, in degrees. This does not limit forearm twist.")]
+    [Range(-90, 0)] public float minimumWristBend = -40f;
+    [Tooltip("Flexion from neutral, in degrees. Requires mapped index/little finger bases.")]
+    [Range(0, 90)] public float maximumWristBend = 50f;
     [Range(1, 80)] public float minimumElbowBend = 15f;
     [Range(81, 170)] public float maximumElbowBend = 150f;
     public bool drawTrackingGizmos = true;
@@ -67,7 +72,7 @@ public class HumanoidBodyController : MonoBehaviour
         public Transform transform;
         public Quaternion restLocal, neutralLocal, restRotation, filteredLocal, avatarToParent;
         public bool ownsPose, finger;
-        public Vector3 restDirection;
+        public Vector3 restDirection, wristBendAxis;
         public float lastTracked = float.NegativeInfinity;
     }
 
@@ -216,8 +221,13 @@ public class HumanoidBodyController : MonoBehaviour
         Transform little = animator.GetBoneTransform(fingers[12]);
         Transform middle = animator.GetBoneTransform(fingers[6]);
         if (wrist != null && index != null && little != null && middle != null)
+        {
             restPalmFrames[left] = Frame(transform.InverseTransformDirection(index.position - little.position),
                 transform.InverseTransformDirection(middle.position - wrist.position));
+            Bone wristBone;
+            if (bones.TryGetValue(hand, out wristBone))
+                wristBone.wristBendAxis = (wristBone.avatarToParent * (restPalmFrames[left] * Vector3.right)).normalized;
+        }
         for (int i = 0; i < fingers.Length; i += 3)
         {
             Add(fingers[i], fingers[i + 1]);
@@ -367,7 +377,7 @@ public class HumanoidBodyController : MonoBehaviour
     {
         // Generic rigs do not expose a shared finger hinge axis. A bind-relative
         // rotation cone is a conservative safety bound, not a fitted anatomy model.
-        if (bone.finger) target = Quaternion.RotateTowards(bone.restLocal, target, maximumFingerJointRotation);
+        target = ConstrainLocal(bone, target);
         if (!deadZone || Quaternion.Angle(bone.filteredLocal, target) > rotationDeadZone)
         {
             float response = bone.finger ? fingerSmoothing : smoothing;
@@ -380,8 +390,18 @@ public class HumanoidBodyController : MonoBehaviour
             bone.filteredLocal = Quaternion.RotateTowards(bone.filteredLocal, smooth,
                 Mathf.Max(1, maximumAngularSpeed) * deltaTime);
         }
+        bone.filteredLocal = ConstrainLocal(bone, bone.filteredLocal);
         bone.transform.localRotation = bone.filteredLocal;
         bone.ownsPose = true;
+    }
+
+    Quaternion ConstrainLocal(Bone bone, Quaternion target)
+    {
+        if (bone.finger) target = Quaternion.RotateTowards(bone.restLocal, target, maximumFingerJointRotation);
+        if (limitWristBend && bone.wristBendAxis.sqrMagnitude > 1e-8f)
+            target = JointConstraints.ClampWristBend(target, bone.restLocal, bone.wristBendAxis,
+                minimumWristBend, maximumWristBend);
+        return target;
     }
 
     void HoldOrResetBone(HumanBodyBones id)
@@ -390,6 +410,7 @@ public class HumanoidBodyController : MonoBehaviour
         if (!bones.TryGetValue(id, out bone)) return;
         if (!returnToRestWhenLost || Time.time - bone.lastTracked <= occlusionGracePeriod)
         {
+            bone.filteredLocal = ConstrainLocal(bone, bone.filteredLocal);
             bone.transform.localRotation = bone.filteredLocal;
             bone.ownsPose = true;
         }

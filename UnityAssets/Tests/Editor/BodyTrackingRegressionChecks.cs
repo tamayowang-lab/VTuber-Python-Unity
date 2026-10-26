@@ -251,6 +251,24 @@ public static class BodyTrackingRegressionChecks
                 Call(controller, "ApplyLocal", bone, Quaternion.Euler(170, 0, 0), 1f/60, true);
             Require(Quaternion.Angle(joint.localRotation, Quaternion.identity)
                 <= controller.maximumFingerJointRotation+0.01f, "Finger exceeded its bind-relative safety cone.");
+            Quaternion wristPositive = JointConstraints.ClampWristBend(Quaternion.AngleAxis(75, Vector3.right),
+                Quaternion.identity, Vector3.right, -35, 45);
+            Require(Quaternion.Angle(wristPositive, Quaternion.AngleAxis(45, Vector3.right)) < 0.01f,
+                "Positive wrist bend exceeded its limit.");
+            Quaternion wristNegative = JointConstraints.ClampWristBend(Quaternion.AngleAxis(-70, Vector3.right),
+                Quaternion.identity, Vector3.right, -35, 45);
+            Require(Quaternion.Angle(wristNegative, Quaternion.AngleAxis(-35, Vector3.right)) < 0.01f,
+                "Negative wrist bend exceeded its limit.");
+            Quaternion pureTwist = Quaternion.AngleAxis(65, Vector3.up);
+            Require(Quaternion.Angle(JointConstraints.ClampWristBend(pureTwist, Quaternion.identity,
+                Vector3.right, -35, 45), pureTwist) < 0.01f, "Wrist bend limit changed a pure forearm twist.");
+            Quaternion parentFrame = Quaternion.Euler(20, 70, -15);
+            Quaternion neutralWrist = Quaternion.Euler(-30, 10, 45);
+            Quaternion transformed = parentFrame*Quaternion.AngleAxis(75, Vector3.right)*Quaternion.Inverse(parentFrame)*neutralWrist;
+            Quaternion clamped = JointConstraints.ClampWristBend(transformed, neutralWrist,
+                parentFrame*Vector3.right, -35, 45);
+            Quaternion expectedWristBend = parentFrame*Quaternion.AngleAxis(45, Vector3.right)*Quaternion.Inverse(parentFrame)*neutralWrist;
+            Require(Quaternion.Angle(clamped, expectedWristBend) < 0.01f, "Wrist limit assumed fixed bone axes.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

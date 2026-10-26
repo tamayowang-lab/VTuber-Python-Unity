@@ -26,10 +26,11 @@ python -m unittest discover -s tests -v
 
 Copy the Python files AND the new `tracking/` directory to the laptop. Do not copy only `main.py`. Keep `body_depth.py`, `head_pose.py`, `facial_features.py`, `pose_estimator.py` and `model.txt` alongside it.
 
-In Unity, import the existing UnityChan package as before. Copy **all three current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
+In Unity, import the existing UnityChan package as before. Copy **all four current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
 
 - `HumanoidBodyController.cs`
-- **`ArmRetargeting.cs` (new required solver)**
+- **`ArmRetargeting.cs` (required solver)**
+- **`JointConstraints.cs` (required wrist-limit helper)**
 - `UnityChanController.cs`
 
 Replace matching scripts rather than adding duplicate classes. Keep the existing supporting UI/preferences/save scripts. No changes to the binary Unity packages or serialized scene are made automatically.
@@ -121,3 +122,7 @@ Manual camera/Editor checks still required:
 The real-face reuse parity test also compares the adapter against the original mirrored FaceMesh on the bundled demo crop (about 1.35 pixels RMS in this run).
 
 Current-instance evidence: blank-frame CPU inference, 33-pose-landmark person-image inference, and 478-face-landmark fallback on a tight demo webcam crop were exercised. A 400-frame synthetic temporal-processing benchmark measured about 1.3 ms mean / 2.1 ms p95 on this machine, **excluding inference, drawing, camera and Unity**. No end-to-end FPS or live-camera latency is claimed.
+
+## Wrist bend bounds
+
+Copy JointConstraints.cs into Assets alongside the existing controller/solver; do not attach this static helper as a component. Enable Limit Wrist Bend. Minimum Wrist Bend defaults to -40 degrees (extension) and Maximum Wrist Bend to +50 (flexion), relative to the captured neutral wrist. Try -25/+35 for tighter limits. The limit uses the neutral index-to-little palm axis expressed in the wrist parent's coordinates, not a hard-coded local X axis. Map the index/middle/little finger bases in the Humanoid Avatar; without a usable palm basis it skips the wrist bound rather than assuming an axis. Signed swing/twist decomposition leaves other wrist components available; this is a flexion/extension bound, not a forearm pronation or radial-deviation limit. It is enforced on the target, filtered pose, and held pose. Optional Unity Editor checks cover both signed bounds, twist preservation and rotated bind frames; they remain unrun here.
