@@ -269,6 +269,37 @@ public static class BodyTrackingRegressionChecks
                 parentFrame*Vector3.right, -35, 45);
             Quaternion expectedWristBend = parentFrame*Quaternion.AngleAxis(45, Vector3.right)*Quaternion.Inverse(parentFrame)*neutralWrist;
             Require(Quaternion.Angle(clamped, expectedWristBend) < 0.01f, "Wrist limit assumed fixed bone axes.");
+            // A palm-normal flip cannot spin the wrist at the arm's 720 deg/s cap.
+            BoneType.GetField("finger").SetValue(bone, false);
+            BoneType.GetField("wrist").SetValue(bone, true);
+            BoneType.GetField("wristBendAxis").SetValue(bone, Vector3.right);
+            BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.identity);
+            Set(controller, "current", new HumanoidBodyController.Packet { adaptiveFiltered = true });
+            Call(controller, "ApplyLocal", bone, Quaternion.AngleAxis(170, Vector3.up), 0.1f, true);
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) <= 12.01f,
+                "Wrist ignored its separate angular speed limit.");
+            for (int i = 0; i < 120; i++)
+                Call(controller, "ApplyLocal", bone, Quaternion.AngleAxis(170, Vector3.up), 1f/60, true);
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) <= 85.01f,
+                "Wrist exceeded its total rotation envelope.");
+            BoneType.GetField("wrist").SetValue(bone, false);
+            BoneType.GetField("wristBendAxis").SetValue(bone, Vector3.zero);
+            BoneType.GetField("finger").SetValue(bone, true);
+            controller.enableInterlacedHandPose = true;
+            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true });
+            Call(controller, "UpdateOverlapPose", true, 0.1f);
+            Require(!(bool)Field(controller, "overlapPoseActive"), "Old automatic cue activated a manual-only preset.");
+            // Stable aim frames remain continuous while an arm passes the
+            // opposite of its bind direction, rather than flipping axial twist.
+            Quaternion previousAim = ArmRetargeting.AimFrame(Vector3.left, Vector3.forward);
+            for (int degree = 5; degree <= 200; degree += 5)
+            {
+                Vector3 direction = Quaternion.AngleAxis(degree, Vector3.forward)*Vector3.left;
+                Quaternion aimed = ArmRetargeting.AimFrame(direction, Vector3.forward);
+                Require(Quaternion.Angle(previousAim, aimed) < 6,
+                    "Arm aim frame flipped at an antiparallel direction.");
+                previousAim = aimed;
+            }
             // The overlap preset must hold first, blend from cached local pose,
             // and return without a snap when real data resumes or the mode exits.
             boneMap[HumanBodyBones.LeftIndexProximal] = bone;
@@ -276,7 +307,8 @@ public static class BodyTrackingRegressionChecks
             BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.Euler(10, 0, 0));
             BoneType.GetField("lastTracked").SetValue(bone, Time.time-5);
             controller.returnToRestWhenLost = true;
-            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true });
+            controller.enableInterlacedHandPose = true;
+            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true, overlapManual = true });
             Call(controller, "UpdateOverlapPose", true, 0f);
             Call(controller, "DriveFingers", true, null, false, 1f/60);
             Require(Quaternion.Angle(joint.localRotation, Quaternion.Euler(10, 0, 0)) < 0.01f,

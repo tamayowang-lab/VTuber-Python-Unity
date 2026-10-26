@@ -99,7 +99,7 @@ def main():
 
         # Pose estimation related
         pose_estimator = PoseEstimator((img.shape[0], img.shape[1]))
-        head_orientation = HeadOrientation()
+        head_orientation = HeadOrientation(getattr(args, 'head_calibration_frames', 12))
         image_points = np.zeros((pose_estimator.model_points_full.shape[0], 2))
 
         # extra 10 points due to new attention model (in iris detection)
@@ -190,6 +190,9 @@ def main():
 
             if body_tracker:
                 body_tracker.draw(img_facemesh)
+            if faces and head_orientation.neutral is None:
+                cv2.putText(img_facemesh, 'Head calibration: look straight and hold still',
+                    (8, img_facemesh.shape[0]-12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
             cv2.imshow('Face, body and hands' if args.body else 'Facial landmark', img_facemesh)
 
             # press "q" to leave
@@ -246,6 +249,9 @@ if __name__ == "__main__":
     parser.add_argument("--raw-tracking", action="store_true", help="Disable adaptive landmark smoothing")
     parser.add_argument("--debug-tracking", action="store_true", help="Show raw/filtered landmarks and identity states")
     parser.add_argument("--video", help="Use a recorded video instead of the webcam")
+
+    parser.add_argument("--head-calibration-frames", type=int, default=12,
+                        help="Stable face samples used for head neutral (default 12)")
 
     args = parser.parse_args()
 

@@ -11,6 +11,15 @@ public static class ArmRetargeting
         public float clearance, minimumBend, maximumBend;
     }
 
+    public static Quaternion AimFrame(Vector3 direction, Vector3 planeNormal)
+    {
+        if (direction.sqrMagnitude < 1e-10f) return Quaternion.identity;
+        Vector3 normal = Vector3.ProjectOnPlane(planeNormal, direction.normalized);
+        if (normal.sqrMagnitude < 1e-8f) normal = Vector3.ProjectOnPlane(Vector3.forward, direction.normalized);
+        if (normal.sqrMagnitude < 1e-8f) normal = Vector3.ProjectOnPlane(Vector3.up, direction.normalized);
+        return Quaternion.LookRotation(direction.normalized, normal.normalized);
+    }
+
     public static bool Solve(Vector3 shoulder, Vector3 target, float upper, float lower,
         Vector3 hint, Vector3 pole, Limits limits, out Vector3 elbow, out Vector3 wrist)
     {

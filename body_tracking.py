@@ -20,6 +20,10 @@ def load_config(path=None, raw=False, debug=False):
     if path:
         with open(path, encoding='utf-8') as stream:
             values = json.load(stream)
+        # Retired auto-overlap thresholds are accepted only for config migration.
+        for key in ('overlap_enter_ratio', 'overlap_exit_ratio', 'overlap_enter_seconds',
+                    'overlap_exit_seconds', 'overlap_lost_seconds'):
+            values.pop(key, None)
         unknown = set(values)-{field.name for field in fields(TrackingConfig)}
         if unknown:
             raise ValueError('Unknown tracking settings: '+', '.join(sorted(unknown)))
@@ -55,7 +59,7 @@ class BodyTracker:
         self.depth.reset()
 
     def cycle_overlap_mode(self):
-        modes = ('auto', 'force', 'off')
+        modes = ('off', 'force')
         self.config.overlap_mode = modes[(modes.index(self.config.overlap_mode)+1) % len(modes)]
         print('Hand overlap mode:', self.config.overlap_mode)
 

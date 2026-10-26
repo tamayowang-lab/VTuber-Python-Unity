@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from itertools import product
 import numpy as np
 from .filtering import OneEuroFilter
-from .overlap import HandOverlap
+from .overlap import ManualHandPoseCue
 
 
 @dataclass
@@ -20,20 +20,14 @@ class TrackingConfig:
     max_image_speed: float = 4.0
     max_world_speed: float = 8.0
     debug: bool = False
-    overlap_mode: str = 'auto'
-    overlap_enter_ratio: float = 1.8
-    overlap_exit_ratio: float = 2.5
-    overlap_enter_seconds: float = 0.12
-    overlap_exit_seconds: float = 0.2
-    overlap_lost_seconds: float = 0.3
+    overlap_mode: str = 'off'
 
     def __post_init__(self):
-        if self.overlap_mode not in ('auto', 'off', 'force'):
-            raise ValueError('overlap_mode must be auto, off or force')
-        if not 0 < self.overlap_enter_ratio < self.overlap_exit_ratio:
-            raise ValueError('Overlap enter ratio must be smaller than exit ratio')
-        if min(self.overlap_enter_seconds, self.overlap_exit_seconds, self.overlap_lost_seconds) < 0:
-            raise ValueError('Overlap durations must be nonnegative')
+        if self.overlap_mode == 'auto':
+            # Safe migration: old configs must not silently replace visible fingers.
+            self.overlap_mode = 'off'
+        if self.overlap_mode not in ('off', 'force'):
+            raise ValueError('overlap_mode must be off or force (manual animation only)')
         for name in ('min_cutoff', 'finger_min_cutoff', 'max_image_speed', 'max_world_speed', 'identity_memory', 'derivative_cutoff'):
             if getattr(self, name) <= 0:
                 raise ValueError(name+' must be positive')
@@ -152,7 +146,7 @@ class MotionPipeline:
         self.pose_filter = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.derivative_cutoff)
         self.image_filter = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.derivative_cutoff)
         self.previous_pose = self.pose_time = self.previous_image = None
-        self.overlap = HandOverlap(self.config)
+        self.overlap = ManualHandPoseCue(self.config)
         self.status = {}
         self.last_time = self.last_packet = None
         self.outlier_pose = None
@@ -243,7 +237,7 @@ class MotionPipeline:
                 else:
                     observations[label] = 'nonfinite-or-malformed'
         self.raw_candidates = candidates
-        overlap_active, overlap_wrists = self.overlap.update(candidates, self.hands, pose_image, aspect, now)
+        overlap_active, overlap_wrists = self.overlap.update(pose_image, aspect)
         assigned = self.assign(candidates, pose_image, now, aspect)
         hands, states = [], []
         for side, (track, points) in enumerate(zip(self.hands, assigned)):
@@ -325,5 +319,5 @@ class MotionPipeline:
         self.last_packet = dict(version=1, pose=packet_points(world, visibility=visibility),
                     imagePose=packet_points(image, aspect, image_visibility),
                     leftHand=hands[0], rightHand=hands[1],
-                    overlapActive=overlap_active, adaptiveFiltered=self.config.enabled, trackingStatus=self.status.copy(), observationStatus=observations, sampleTime=float(now))
+                    overlapActive=overlap_active, overlapManual=overlap_active, adaptiveFiltered=self.config.enabled, trackingStatus=self.status.copy(), observationStatus=observations, sampleTime=float(now))
         return self.last_packet

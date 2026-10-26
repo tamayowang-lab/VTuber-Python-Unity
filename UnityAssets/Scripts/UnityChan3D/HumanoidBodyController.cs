@@ -28,19 +28,25 @@ public class HumanoidBodyController : MonoBehaviour
     [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
     public bool requireHandForArmTracking = false;
     public bool inferArmFromHand = true;
-    [Header("Overlapping / interlaced hands (approximation)")]
-    public bool enableInterlacedHandPose = true;
+    [Header("Optional manual hand pose (animation only)")]
+    [Tooltip("Explicit manual cue only; never recognizes or reconstructs hidden fingers.")]
+    public bool enableInterlacedHandPose = false;
     [Min(0)] public float overlapFingerHoldSeconds = 0.15f;
     [Min(0.01f)] public float overlapBlendSeconds = 0.3f;
     public HandPosePreset leftInterlacedHand = new HandPosePreset();
     public HandPosePreset rightInterlacedHand = new HandPosePreset();
     [SerializeField] bool overlapPoseActive;
-    [Header("Wrist bend")]
+    [Header("Wrist safety")]
+    [Tooltip("Enable flexion/extension and total wrist-rotation safety bounds.")]
     public bool limitWristBend = true;
+    [Tooltip("Total bind-relative wrist rotation; forearm pronation should not be imitated by unlimited wrist twist.")]
+    [Range(15, 120)] public float maximumWristRotation = 85f;
+    [Min(1)] public float maximumWristAngularSpeed = 120f;
     [Tooltip("Extension from neutral, in degrees. This does not limit forearm twist.")]
     [Range(-90, 0)] public float minimumWristBend = -40f;
     [Tooltip("Flexion from neutral, in degrees. Requires mapped index/little finger bases.")]
     [Range(0, 90)] public float maximumWristBend = 50f;
+    [Header("Arm IK / elbow limits")]
     [Range(1, 80)] public float minimumElbowBend = 15f;
     [Range(81, 170)] public float maximumElbowBend = 150f;
     public bool drawTrackingGizmos = true;
@@ -71,7 +77,7 @@ public class HumanoidBodyController : MonoBehaviour
     {
         public int version;
         public Point[] pose, leftHand, rightHand, imagePose;
-        public bool overlapActive;
+        public bool overlapActive, overlapManual;
         public bool adaptiveFiltered;
         public bool depthValid;
         public float depthOffset;
@@ -80,7 +86,7 @@ public class HumanoidBodyController : MonoBehaviour
     {
         public Transform transform;
         public Quaternion restLocal, neutralLocal, restRotation, filteredLocal, avatarToParent;
-        public bool ownsPose, finger;
+        public bool ownsPose, finger, wrist;
         public Vector3 restDirection, wristBendAxis, fingerCurlAxis;
         public Quaternion overlapHeldLocal, overlapReleaseLocal;
         public float lastTracked = float.NegativeInfinity;
@@ -89,7 +95,9 @@ public class HumanoidBodyController : MonoBehaviour
     class ArmGeometry
     {
         public float upperLength, lowerLength;
-        public Vector3 lastPole;
+        public Vector3 lastPole, lastPlaneNormal;
+        public Quaternion upperBindFrame, lowerBindFrame;
+        public bool framesReady;
     }
     readonly Dictionary<bool, ArmGeometry> armGeometry = new Dictionary<bool, ArmGeometry>();
     float avatarShoulderSpan;
@@ -228,6 +236,8 @@ public class HumanoidBodyController : MonoBehaviour
                 lowerLength = (transform.InverseTransformPoint(handTransform.position)
                     - transform.InverseTransformPoint(lowerTransform.position)).magnitude,
                 lastPole = new Vector3(left ? -0.5f : 0.5f, -1, 0.5f) };
+        Bone handBone;
+        if (bones.TryGetValue(hand, out handBone)) handBone.wrist = true;
         Transform wrist = animator.GetBoneTransform(hand);
         Transform index = animator.GetBoneTransform(fingers[3]);
         Transform little = animator.GetBoneTransform(fingers[12]);
@@ -409,7 +419,7 @@ public class HumanoidBodyController : MonoBehaviour
             float blend = adaptive || response <= 0 ? 1 : 1f - Mathf.Exp(-response * deltaTime);
             Quaternion smooth = Quaternion.Slerp(bone.filteredLocal, target, blend);
             bone.filteredLocal = Quaternion.RotateTowards(bone.filteredLocal, smooth,
-                Mathf.Max(1, maximumAngularSpeed) * deltaTime);
+                Mathf.Max(1, bone.wrist ? maximumWristAngularSpeed : maximumAngularSpeed) * deltaTime);
         }
         bone.filteredLocal = ConstrainLocal(bone, bone.filteredLocal);
         bone.transform.localRotation = bone.filteredLocal;
@@ -422,6 +432,8 @@ public class HumanoidBodyController : MonoBehaviour
         if (limitWristBend && bone.wristBendAxis.sqrMagnitude > 1e-8f)
             target = JointConstraints.ClampWristBend(target, bone.restLocal, bone.wristBendAxis,
                 minimumWristBend, maximumWristBend);
+        if (limitWristBend && bone.wrist)
+            target = Quaternion.RotateTowards(bone.restLocal, target, maximumWristRotation);
         return target;
     }
 
@@ -584,14 +596,21 @@ public class HumanoidBodyController : MonoBehaviour
         Vector3 palmUp = TrackingPosition(hand[9]) - TrackingPosition(hand[0]);
         Bone palmBone;
         Quaternion restFrame;
-        bool palmReliable = hand[0].visibility >= minimumVisibility
+        float palmLengths = palmRight.magnitude*palmUp.magnitude;
+        float spatialArea = Vector3.Cross(palmRight, palmUp).magnitude;
+        float projectedArea = Mathf.Abs(palmRight.x*palmUp.y-palmRight.y*palmUp.x);
+        // A nearly edge-on/collapsed palm cannot provide a stable normal from
+        // monocular regressed depth. Hold the wrist rather than chase its flips.
+        bool palmReliable = palmLengths > 1e-8f && spatialArea/palmLengths > 0.25f
+            && projectedArea/palmLengths > 0.08f && hand[0].visibility >= minimumVisibility
             && hand[5].visibility >= minimumVisibility && hand[9].visibility >= minimumVisibility
             && hand[17].visibility >= minimumVisibility && palmUp.sqrMagnitude > 1e-8f
             && Vector3.Cross(palmRight, palmUp).sqrMagnitude > 1e-10f;
         if (palmReliable && bones.TryGetValue(palm, out palmBone) && restPalmFrames.TryGetValue(left, out restFrame))
             Rotate(palmBone, Frame(palmRight, palmUp) * Quaternion.Inverse(restFrame) * palmBone.restRotation);
         else if (!HoldOverlapPalm(palm)) ResetBone(palm);
-        DriveFingers(left, hand, palmReliable, Time.deltaTime);
+        // Palm orientation confidence must not disable otherwise valid fingers.
+        DriveFingers(left, hand, true, Time.deltaTime);
     }
 
     bool HoldOverlapPalm(HumanBodyBones id)
@@ -608,7 +627,7 @@ public class HumanoidBodyController : MonoBehaviour
 
     void UpdateOverlapPose(bool live, float deltaTime)
     {
-        bool requested = enableInterlacedHandPose && live && current.overlapActive;
+        bool requested = enableInterlacedHandPose && live && current.overlapActive && current.overlapManual;
         if (requested && !overlapPoseActive)
         {
             overlapStarted = Time.time;
@@ -626,7 +645,7 @@ public class HumanoidBodyController : MonoBehaviour
         overlapWeight = Mathf.MoveTowards(overlapWeight, target, deltaTime/Mathf.Max(0.01f, overlapBlendSeconds));
     }
 
-    void DriveFingers(bool left, Point[] hand, bool palmReliable, float deltaTime)
+    void DriveFingers(bool left, Point[] hand, bool handReliable, float deltaTime)
     {
         HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
         HandPosePreset preset = left ? leftInterlacedHand : rightInterlacedHand;
@@ -635,7 +654,7 @@ public class HumanoidBodyController : MonoBehaviour
             (TrackingPosition(hand[9])-TrackingPosition(hand[0])).magnitude);
         for (int finger = 0; finger < 5; finger++)
         {
-            bool measured = !overlapPoseActive && hand != null && palmReliable && FingerReliable(hand, finger, palmSize);
+            bool measured = !overlapPoseActive && hand != null && handReliable && FingerReliable(hand, finger, palmSize);
             for (int segment = 0; segment < 3; segment++)
             {
                 Bone bone;
@@ -744,9 +763,26 @@ public class HumanoidBodyController : MonoBehaviour
         Vector3 elbow, wrist;
         if (!ArmRetargeting.Solve(shoulder, target, geometry.upperLength, geometry.lowerLength,
             hint, geometry.lastPole, limits, out elbow, out wrist)) return false;
-        Aim(upperId, elbow-shoulder);
         Bone lower, upper;
         if (!bones.TryGetValue(lowerId, out lower) || !bones.TryGetValue(upperId, out upper)) return false;
+        if (!geometry.framesReady)
+        {
+            Vector3 restPole = new Vector3(left ? -0.5f : 0.5f, -1, 0.5f);
+            geometry.lastPlaneNormal = Vector3.Cross(upper.restDirection, restPole).normalized;
+            geometry.upperBindFrame = ArmRetargeting.AimFrame(upper.restDirection, geometry.lastPlaneNormal);
+            geometry.lowerBindFrame = ArmRetargeting.AimFrame(lower.restDirection, geometry.lastPlaneNormal);
+            geometry.framesReady = true;
+        }
+        // Bone direction alone leaves axial twist undefined, especially at the
+        // FromToRotation antipode. Use a continuous IK bend-plane reference.
+        Vector3 normal = Vector3.Cross(wrist-shoulder, elbow-shoulder);
+        if (normal.sqrMagnitude < 1e-8f) normal = geometry.lastPlaneNormal;
+        else normal.Normalize();
+        if (Vector3.Dot(normal, geometry.lastPlaneNormal) < 0) normal = -normal;
+        geometry.lastPlaneNormal = normal;
+        Quaternion upperTarget = ArmRetargeting.AimFrame(elbow-shoulder, normal)
+            * Quaternion.Inverse(geometry.upperBindFrame)*upper.restRotation;
+        Rotate(upper, upperTarget);
         Vector3 actualElbow = transform.InverseTransformPoint(lower.transform.position);
         if (constrain && Vector3.Dot(actualElbow-center, right.normalized*(left ? -1 : 1)) < clearance)
         {
@@ -754,13 +790,15 @@ public class HumanoidBodyController : MonoBehaviour
             if (ArmRetargeting.Solve(shoulder, wrist, geometry.upperLength, geometry.lowerLength,
                 actualElbow, geometry.lastPole, limits, out correction, out adjustedWrist))
             {
-                upper.transform.rotation = Quaternion.FromToRotation(transform.TransformDirection(actualElbow-shoulder),
-                    transform.TransformDirection(correction-shoulder))*upper.transform.rotation;
+                upper.transform.rotation = transform.rotation * ArmRetargeting.AimFrame(correction-shoulder, normal)
+                    * Quaternion.Inverse(geometry.upperBindFrame)*upper.restRotation;
                 upper.filteredLocal = upper.transform.localRotation;
                 actualElbow = transform.InverseTransformPoint(lower.transform.position);
             }
         }
-        Aim(lowerId, wrist-actualElbow);
+        Quaternion lowerTarget = ArmRetargeting.AimFrame(wrist-actualElbow, normal)
+            * Quaternion.Inverse(geometry.lowerBindFrame)*lower.restRotation;
+        Rotate(lower, lowerTarget);
         int side = left ? 0 : 1;
         debugShoulder[side] = shoulder; debugElbow[side] = elbow; debugWrist[side] = wrist; debugValid[side] = true;
         return true;
