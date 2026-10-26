@@ -199,8 +199,6 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            if key == ord('i') and body_tracker:
-                body_tracker.cycle_overlap_mode()
             if key == ord('c'):
                 head_orientation.reset()
                 if body_tracker:

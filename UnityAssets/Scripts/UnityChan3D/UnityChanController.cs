@@ -21,7 +21,7 @@ public class UnityChanController : MonoBehaviour, ISaveable
     [Min(0)] public float headSmoothing = 10f;
     public bool compensateTorsoMotion = true;
 
-    [Header("Iris / gaze tracking")]
+    // Iris / gaze tracking
     public bool enableEyeTracking = true;
     public enum EyeDriveMode { Automatic, BoneRotation, MaterialOffset }
     public EyeDriveMode eyeDriveMode = EyeDriveMode.Automatic;
@@ -83,10 +83,10 @@ public class UnityChanController : MonoBehaviour, ISaveable
     private EyeSurface leftSurface, rightSurface;
     private Quaternion filteredHeadOffset = Quaternion.identity;
 
-        Thread receiveThread;
+    Thread receiveThread;
     TcpClient client;
     TcpListener listener;
-    int port = 5066;
+    [SerializeField] private int port = 5066;
 
     private float roll = 0, pitch = 0, yaw = 0;
     private float x_ratio_left = 0.5f, y_ratio_left = 0.5f, x_ratio_right = 0.5f, y_ratio_right = 0.5f;
@@ -234,6 +234,8 @@ public class UnityChanController : MonoBehaviour, ISaveable
     void Update()
     {
         ConsumeFace();
+        if (autoBlinkScript != null && autoBlinkScript.enabled != isAutoBlinkActive)
+            autoBlinkScript.enabled = isAutoBlinkActive;
         if (GazeCalibrationPressed()) RecalibrateEyes();
         // disable the eye blinking control by the user if AutoBlink script is running
         if (!isAutoBlinkActive)

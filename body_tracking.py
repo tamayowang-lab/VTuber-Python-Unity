@@ -20,8 +20,8 @@ def load_config(path=None, raw=False, debug=False):
     if path:
         with open(path, encoding='utf-8') as stream:
             values = json.load(stream)
-        # Retired auto-overlap thresholds are accepted only for config migration.
-        for key in ('overlap_enter_ratio', 'overlap_exit_ratio', 'overlap_enter_seconds',
+        # Removed pose-guessing keys are ignored only for old-config migration.
+        for key in ('overlap_mode', 'overlap_enter_ratio', 'overlap_exit_ratio', 'overlap_enter_seconds',
                     'overlap_exit_seconds', 'overlap_lost_seconds'):
             values.pop(key, None)
         unknown = set(values)-{field.name for field in fields(TrackingConfig)}
@@ -58,11 +58,6 @@ class BodyTracker:
     def reset_depth(self):
         self.depth.reset()
 
-    def cycle_overlap_mode(self):
-        modes = ('off', 'force')
-        self.config.overlap_mode = modes[(modes.index(self.config.overlap_mode)+1) % len(modes)]
-        print('Hand overlap mode:', self.config.overlap_mode)
-
     def face_detector(self):
         return HolisticFaceAdapter(self)
 
@@ -95,7 +90,7 @@ class BodyTracker:
         mirrored_frame[:] = cv2.flip(canvas, 1)
         if self.config.debug:
             status = self.packet['trackingStatus']
-            cv2.putText(mirrored_frame, 'L: '+status['left']+'  R: '+status['right']+(' | OVERLAP approximation' if self.packet['overlapActive'] else ''),
+            cv2.putText(mirrored_frame, 'L: '+status['left']+'  R: '+status['right'],
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             pose = getattr(self.raw_result, 'pose_landmarks', None)
             confidences = 'no body wrists' if pose is None else 'body wrist vis L %.2f R %.2f' % (
@@ -207,8 +202,6 @@ def preview():
                 break
             if key == ord('c'):
                 tracker.reset_depth()
-            if key == ord('i'):
-                tracker.cycle_overlap_mode()
     finally:
         cap.release()
         if tracker:

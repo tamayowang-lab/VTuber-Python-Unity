@@ -26,12 +26,11 @@ python -m unittest discover -s tests -v
 
 Copy the Python files AND the new `tracking/` directory to the laptop. Do not copy only `main.py`. Keep `body_depth.py`, `head_pose.py`, `facial_features.py`, `pose_estimator.py` and `model.txt` alongside it.
 
-In Unity, import the existing UnityChan package as before. Copy **all five current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
+In Unity, import the existing UnityChan package as before. Copy **all four current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
 
 - `HumanoidBodyController.cs`
 - **`ArmRetargeting.cs` (required solver)**
 - **`JointConstraints.cs` (required wrist-limit helper)**
-- **`HandPosePreset.cs` (required overlap-preset data class)**
 - `UnityChanController.cs`
 
 Replace matching scripts rather than adding duplicate classes. Keep the existing supporting UI/preferences/save scripts. No changes to the binary Unity packages or serialized scene are made automatically.
@@ -52,7 +51,7 @@ python body_tracking.py --video recorded-upper-body.mp4 --debug-tracking
 python body_tracking.py --video recorded-upper-body.mp4 --raw-tracking --debug-tracking
 ```
 
-`Q` quits. `I` toggles the optional manual hand-pose cue off/force. `C` recalibrates optional depth; in main.py it also resets head neutral. `G` in Unity's focused Game window recalibrates gaze. See [EYES.md](EYES.md) for the current eye controls.
+`Q` quits. The former I-key manual hand-pose cue has been removed. `C` recalibrates optional depth; in main.py it also resets head neutral. `G` in Unity's focused Game window recalibrates gaze. See [EYES.md](EYES.md) for the current eye controls.
 
 ## Coordinates and mirroring
 
@@ -80,22 +79,16 @@ Brief missing hands may translate their last reliable shape using capped wrist v
 
 Existing Inspector values survive source updates; check these explicitly:
 
-| Setting | Start with | Meaning |
-|---|---:|---|
-| Minimum Visibility | 0.6 | Gate pose/palm/finger data; predicted samples use reduced visibility |
-| Maximum Angular Speed | 720 deg/s | Safety cap; old 240 value may noticeably limit fast arms |
-| Maximum Finger Joint Rotation | 100 degrees | Bind-relative safety cone; not a calibrated hinge model |
-| Rotation Dead Zone | 1 degree | Ignore tiny target changes; lower for fine finger motions |
-| Smoothing / Finger Smoothing | 8 / 5 | Rest blending and old-sender fallback |
-| Occlusion Grace Period | 0.4 seconds | Hold last local pose before rest |
-| Return To Rest When Lost | checked | Otherwise hold indefinitely while packets continue |
-| Require Hand For Arm Tracking | unchecked | Arm confidence is independent of detailed finger detection |
-| Infer Arm From Hand | checked | Use bounded image-based inference only when measured arm is unreliable |
-| Minimum / Maximum Elbow Bend | 15 / 150 degrees | Avoid locked straight arms and over-folding |
-| Limit Elbow Inward | checked | Keep elbow outside torso-relative side plane |
-| Elbow Side Clearance | 0.35 shoulder widths | Higher keeps elbows farther out |
-| Resting Arm Side Angle / Elbow Bend | 18 / 18 degrees | More spacious relaxed rest, without altering bind reference |
-| Depth Motion | Disabled | Optional stylized lean or whole-root movement, not absolute depth measurement |
+The component now uses an Editor-only foldout interface. Copy `UnityAssets/Editor/TrackingControllerEditors.cs` into **Assets/Editor/** to see the nested controls. See [Inspector layout and naming](INSPECTOR.md). Runtime field names are preserved for existing scene/prefab tuning.
+
+| Part | Blend rate (1/s) | Maximum speed (deg/s) | Dead zone (deg) | Rotation/bend limits |
+|---|---:|---:|---:|---|
+| Arms | 8 | 720 | 1 | Elbow 15..150; optional inward clearance 0.35 shoulder widths |
+| Wrists | 8 | 120 | 1 | Total 85; extension -40 / flexion +50 |
+| Fingers | 5 | 720 | 1 | Joint safety cone 100 |
+| Torso | 8 | 720 | 1 | Lean/turn 40 |
+
+Shared hold-last-pose time is 0.4 seconds; packet timeout is 0.5 seconds. The relaxed rest pose uses arm side angle 18 degrees and elbow bend 18 degrees. Optional estimates have a new master switch defaulting OFF, so previous saved experimental flags cannot silently activate. Missing-arm inference, shoulder-only torso estimation, depth motion and diagnostic previews are at the bottom; use them only deliberately. Full torso tracking requires reliable shoulders and hips when shoulder-only estimation is off. The conservative-defaults button turns optional features off without changing core limits/smoothing.
 
 New packets flag `adaptiveFiltered`. For measured poses from these packets Unity avoids a second fixed low-pass stage, retaining its angular speed bound and SLERP safety step. Rest transitions still advance from the cached local pose rather than the Animator's freshly-written T-pose. Old senders without the flag retain the existing Unity smoothing.
 
@@ -128,11 +121,11 @@ Current-instance evidence: blank-frame CPU inference, 33-pose-landmark person-im
 
 Copy JointConstraints.cs into Assets alongside the existing controller/solver; do not attach this static helper as a component. Enable Limit Wrist Bend. Minimum Wrist Bend defaults to -40 degrees (extension) and Maximum Wrist Bend to +50 (flexion), relative to the captured neutral wrist. Try -25/+35 for tighter limits. The limit uses the neutral index-to-little palm axis expressed in the wrist parent's coordinates, not a hard-coded local X axis. Map the index/middle/little finger bases in the Humanoid Avatar; without a usable palm basis it skips the wrist bound rather than assuming an axis. Signed swing/twist decomposition applies Min/Max only to flexion/extension. The separate Maximum Wrist Rotation safety cone bounds combined wrist twist/deviation; actual forearm pronation is a parent-bone motion and is not reconstructed accurately by unrestricted wrist rotation. It is enforced on the target, filtered pose, and held pose. Optional Unity Editor checks cover both signed bounds, twist preservation and rotated bind frames; they remain unrun here.
 
-## Optional manual hand-pose cue (automatic overlap retired)
+## Removed crossing/interlacing guesses
 
-Close wrists do not prove hidden/interlaced fingers. Automatic proximity-based activation has been removed, including its entry/exit timers and thresholds. `overlap_mode` now defaults to `off`. Old JSON `auto` values migrate to `off`, obsolete auto-threshold keys are ignored by the loader, and your tuned One Euro settings remain intact. Visible valid fingers are no longer suppressed merely because the hands are close. Genuine duplicate/ambiguous detections are still handled by the ordinary identity/validation pipeline; that is separate from an animation preset.
+The automatic and manual interlaced-hand presets, proximity heuristics, I-key cue, strict Require Hand For Arm Tracking option, and their runtime fields/helper code have been removed. Tracking valid arms never requires visible fingers. Normal arm IK, elbow clearance, independent finger validation, bounded short wrist prediction and the hold/return policy remain. The old JSON overlap keys are ignored solely for migration; they cannot activate a guessed pose. Your One Euro tuning is preserved.
 
-If you deliberately want the old visual approximation, enable Enable Interlaced Hand Pose in Unity (now default off) and press I in the Python preview to toggle `off` / `force`. The optional wire flags must say both overlapActive and overlapManual; an older automatic cue cannot trigger the new Unity preset. No recognition of interlacing, hidden finger reconstruction, depth recovery or contact accuracy is implied. The manual preset can still be tuned with Left/Right Interlaced Hand curls, Overlap Finger Hold Seconds and Overlap Blend Seconds. It preserves cached local poses for blend-in/out. HandPosePreset.cs remains a required data-class helper, not a component.
+When updating an existing Unity project, delete the obsolete `HandPosePreset.cs` file. Remove the obsolete Python `tracking/overlap.py` and old `tests/test_hand_overlap.py` if merging folders, or extract a fresh checkout and copy your tuned JSON. These files are absent from the new download. Update the runtime controllers, helpers, and optional Editor regression checks together.
 
 ## Wrist stability and head neutral
 
@@ -142,6 +135,6 @@ Head neutral previously captured one face sample, potentially locking in an init
 
 ## Helper organization and contact limits
 
-Keep helpers separated by responsibility: ArmRetargeting solves IK, JointConstraints bounds joints, HandPosePreset stores an optional animation pose; HumanoidBodyController owns the runtime update. They compile together and separate source files do not add per-frame Update calls or meaningful CPU overhead. Do not make helpers separate MonoBehaviour components or split every small method into its own file. Current helpers should remain beside their controller in Assets.
+Keep helpers separated by responsibility: ArmRetargeting solves IK and JointConstraints bounds joints; HumanoidBodyController owns the runtime update. They compile together and separate source files do not add per-frame Update calls or meaningful CPU overhead. Do not make helpers separate MonoBehaviour components or split every small method into its own file. Current helpers should remain beside their controller in Assets.
 
 A standard webcam does not provide reliable absolute hand-to-face distance. The body pose is hip-relative, hand z is wrist-relative, and avatar proportions differ. A hand remaining away from the cheek is therefore not solved by overlap presets or global smoothing. A separate contact-aware wrist-target IK feature could approximate touching, but it would be an intentional interaction constraint, not recovered depth. It is not implemented by this update. Do not scale bones or remove safety limits to force contact.

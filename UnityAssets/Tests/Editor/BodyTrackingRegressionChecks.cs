@@ -89,19 +89,7 @@ public static class BodyTrackingRegressionChecks
                 "Held pose did not follow its parent.");
             root.transform.rotation = Quaternion.identity;
 
-            // A high-confidence inferred body wrist must not drive an arm
-            // when its detailed hand detection is missing (default policy).
-            controller.requireHandForArmTracking = true;
             IDictionary boneMap = (IDictionary)Field(controller, "bones");
-            boneMap[HumanBodyBones.LeftUpperArm] = bone;
-            HumanoidBodyController.Point[] inferred = new HumanoidBodyController.Point[33];
-            for (int i = 0; i < inferred.Length; i++)
-                inferred[i] = new HumanoidBodyController.Point { x = i * 0.01f, y = 1, visibility = 1 };
-            joint.localRotation = Quaternion.identity;
-            Call(controller, "ApplyArm", true, inferred, null);
-            Require(Quaternion.Angle(joint.localRotation, raised) < 0.001f,
-                "Missing hand allowed inferred pose wrist to move the arm.");
-            boneMap.Remove(HumanBodyBones.LeftUpperArm);
 
             // A timed-out session must release ownership as well.
             Set(controller, "current", new HumanoidBodyController.Packet());
@@ -127,6 +115,8 @@ public static class BodyTrackingRegressionChecks
             Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) > 5, "Spine-only torso did not lean.");
             Require(root.transform.position == fixedPosition, "Torso moved its anchor.");
 
+            controller.enableOptionalEstimates = true;
+            controller.allowShoulderOnlyTorso = true;
             // Upper-body framing: shoulders can still supply turn/side tilt without hips.
             pose[23].visibility = pose[24].visibility = 0;
             pose[12].y = 1.2f;
@@ -194,6 +184,7 @@ public static class BodyTrackingRegressionChecks
             Set(controller, "rootRestPosition", root.transform.localPosition);
             Set(controller, "rootForwardInParent", Vector3.forward);
             Set(controller, "current", new HumanoidBodyController.Packet { depthValid = true, depthOffset = 0.5f });
+            controller.enableOptionalEstimates = true;
             controller.depthMotion = HumanoidBodyController.DepthMotionMode.WholeAvatar;
             for (int i = 0; i < 180; i++) Call(controller, "ApplyDepthMotion", true, 1f / 60);
             Require(root.transform.localPosition.z > 0.1f, "Whole-avatar depth did not move forward.");
@@ -285,10 +276,6 @@ public static class BodyTrackingRegressionChecks
             BoneType.GetField("wrist").SetValue(bone, false);
             BoneType.GetField("wristBendAxis").SetValue(bone, Vector3.zero);
             BoneType.GetField("finger").SetValue(bone, true);
-            controller.enableInterlacedHandPose = true;
-            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true });
-            Call(controller, "UpdateOverlapPose", true, 0.1f);
-            Require(!(bool)Field(controller, "overlapPoseActive"), "Old automatic cue activated a manual-only preset.");
             // Stable aim frames remain continuous while an arm passes the
             // opposite of its bind direction, rather than flipping axial twist.
             Quaternion previousAim = ArmRetargeting.AimFrame(Vector3.left, Vector3.forward);
@@ -300,41 +287,17 @@ public static class BodyTrackingRegressionChecks
                     "Arm aim frame flipped at an antiparallel direction.");
                 previousAim = aimed;
             }
-            // The overlap preset must hold first, blend from cached local pose,
-            // and return without a snap when real data resumes or the mode exits.
-            boneMap[HumanBodyBones.LeftIndexProximal] = bone;
-            BoneType.GetField("fingerCurlAxis").SetValue(bone, Vector3.right);
-            BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.Euler(10, 0, 0));
-            BoneType.GetField("lastTracked").SetValue(bone, Time.time-5);
-            controller.returnToRestWhenLost = true;
-            controller.enableInterlacedHandPose = true;
-            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true, overlapManual = true });
-            Call(controller, "UpdateOverlapPose", true, 0f);
-            Call(controller, "DriveFingers", true, null, false, 1f/60);
-            Require(Quaternion.Angle(joint.localRotation, Quaternion.Euler(10, 0, 0)) < 0.01f,
-                "Overlap skipped the initial held pose.");
-            Set(controller, "overlapStarted", Time.time-1);
-            Call(controller, "UpdateOverlapPose", true, 0.3f);
-            for (int i = 0; i < 120; i++)
-            {
-                joint.localRotation = Quaternion.Euler(90, 0, 0); // Competing Animator pose.
-                Call(controller, "DriveFingers", true, null, false, 1f/60);
-            }
-            Require(Quaternion.Angle(joint.localRotation, Quaternion.Euler(30, 0, 0)) < 0.1f,
-                "Overlap did not converge to the configured finger preset.");
-            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = false });
-            Call(controller, "UpdateOverlapPose", true, 0f);
-            Quaternion beforeRelease = joint.localRotation;
-            Call(controller, "DriveFingers", true, null, false, 1f/60);
-            Require(Quaternion.Angle(joint.localRotation, beforeRelease) < 0.1f,
-                "Leaving overlap snapped immediately to the fallback pose.");
-            for (int i = 0; i < 180; i++)
-            {
-                Call(controller, "UpdateOverlapPose", true, 1f/60);
-                Call(controller, "DriveFingers", true, null, false, 1f/60);
-            }
-            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) < 0.1f,
-                "Overlap release did not return smoothly to a fallback pose.");
+            // Each part has its own speed cap; tightening fingers must not
+            // change the arm/wrist cap. Preserve cached-pose filtering semantics.
+            BoneType.GetField("wrist").SetValue(bone, false);
+            BoneType.GetField("finger").SetValue(bone, true);
+            BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.identity);
+            controller.maximumFingerAngularSpeed = 30;
+            controller.maximumAngularSpeed = 720;
+            Set(controller, "current", new HumanoidBodyController.Packet { adaptiveFiltered = true });
+            Call(controller, "ApplyLocal", bone, Quaternion.Euler(60, 0, 0), 0.1f, true);
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) <= 3.01f,
+                "Finger ignored its independent speed cap.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

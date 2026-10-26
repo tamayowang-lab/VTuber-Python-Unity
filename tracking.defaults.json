@@ -10,6 +10,5 @@
   "identity_memory": 0.5,
   "max_image_speed": 4.0,
   "max_world_speed": 8.0,
-  "debug": false,
-  "overlap_mode": "off"
+  "debug": false
 }

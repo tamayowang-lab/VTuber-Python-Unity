@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from itertools import product
 import numpy as np
 from .filtering import OneEuroFilter
-from .overlap import ManualHandPoseCue
 
 
 @dataclass
@@ -20,14 +19,8 @@ class TrackingConfig:
     max_image_speed: float = 4.0
     max_world_speed: float = 8.0
     debug: bool = False
-    overlap_mode: str = 'off'
 
     def __post_init__(self):
-        if self.overlap_mode == 'auto':
-            # Safe migration: old configs must not silently replace visible fingers.
-            self.overlap_mode = 'off'
-        if self.overlap_mode not in ('off', 'force'):
-            raise ValueError('overlap_mode must be off or force (manual animation only)')
         for name in ('min_cutoff', 'finger_min_cutoff', 'max_image_speed', 'max_world_speed', 'identity_memory', 'derivative_cutoff'):
             if getattr(self, name) <= 0:
                 raise ValueError(name+' must be positive')
@@ -67,7 +60,7 @@ class HandTrack:
         horizon = min(max(now-self.time, 0), self.config.prediction_seconds)
         return self.raw[0] + self.velocity*horizon
 
-    def accept(self, points, now, freeze_fingers=False):
+    def accept(self, points, now):
         visibility = np.ones(21)
         palm = max(np.linalg.norm(points[9]-points[0]), np.linalg.norm(points[5]-points[17]))
         if palm < 1e-5 or palm > 1.0:
@@ -115,12 +108,6 @@ class HandTrack:
                 self.filter.raw[indices] = points[indices]
                 self.filter.value[indices] = points[indices]
                 self.filter.derivative[indices] = 0
-        if freeze_fingers:
-            for i in range(1, 21):
-                if i in (5, 9, 17):
-                    continue  # Keep measured palm bases, not the hidden curls.
-                visibility[i] = 0
-                points[i] = self.raw[i]+points[0]-self.raw[0] if self.raw is not None else points[0]
         if self.raw is not None and 0 < dt < 0.25:
             speed = (points[0]-self.raw[0])/dt
             norm = np.linalg.norm(speed)
@@ -146,7 +133,6 @@ class MotionPipeline:
         self.pose_filter = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.derivative_cutoff)
         self.image_filter = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.derivative_cutoff)
         self.previous_pose = self.pose_time = self.previous_image = None
-        self.overlap = ManualHandPoseCue(self.config)
         self.status = {}
         self.last_time = self.last_packet = None
         self.outlier_pose = None
@@ -179,14 +165,13 @@ class MotionPipeline:
                 candidates = [candidates[0]]
         costs = np.full((2, len(candidates)), 10.0)
         for side, track in enumerate(self.hands):
-            memory = track.time is not None and (self.overlap.active or now-track.time <= self.config.identity_memory)
+            memory = track.time is not None and (now-track.time <= self.config.identity_memory)
             for c, (label, points) in enumerate(candidates):
                 evidence = []
                 if anchors[side] is not None:
                     evidence.append((distance(points[0], anchors[side][0]), anchors[side][1]))
                 if memory:
-                    weight = 0.25 if self.overlap.active and anchors[side] is not None else 0.8
-                    evidence.append((distance(points[0], track.expected(now)), weight))
+                    evidence.append((distance(points[0], track.expected(now)), 0.8))
                 if evidence:
                     costs[side, c] = sum(d*w for d, w in evidence)/sum(w for _, w in evidence)
                     costs[side, c] += 0.015*(label != side)  # Holistic semantic side is only a weak prior.
@@ -237,30 +222,17 @@ class MotionPipeline:
                 else:
                     observations[label] = 'nonfinite-or-malformed'
         self.raw_candidates = candidates
-        overlap_active, overlap_wrists = self.overlap.update(pose_image, aspect)
         assigned = self.assign(candidates, pose_image, now, aspect)
         hands, states = [], []
-        for side, (track, points) in enumerate(zip(self.hands, assigned)):
-            accepted, state = (None, 'missing') if points is None else track.accept(points, now, overlap_active)
+        for track, points in zip(self.hands, assigned):
+            accepted, state = (None, 'missing') if points is None else track.accept(points, now)
             if accepted is None:
                 accepted = track.missing(now)
                 if accepted is not None:
                     state = 'predicted'
             visibility = track.visibility.copy()
-            if overlap_active and accepted is None and track.filtered is not None and overlap_wrists[side] is not None:
-                # A body-wrist observation can translate a HELD palm; it is not
-                # a newly observed hand and never extrapolates finger bends.
-                accepted = track.filtered.copy()
-                accepted[:, :2] += overlap_wrists[side][:2]-accepted[0, :2]
-                visibility[:] = 0
-                visibility[[0, 5, 9, 17]] = 0.65
-                state = 'overlap-held'
             if state == 'predicted':
                 visibility *= 0.65
-            if overlap_active and accepted is not None:
-                visibility[[i for i in range(1, 21) if i not in (5, 9, 17)]] = 0
-                if state not in ('overlap-held', 'predicted'):
-                    state = 'overlap-palm'
             hands.append(packet_points(accepted, visibility=visibility))
             states.append(state)
         world = array(getattr(result, 'pose_world_landmarks', None))
@@ -319,5 +291,5 @@ class MotionPipeline:
         self.last_packet = dict(version=1, pose=packet_points(world, visibility=visibility),
                     imagePose=packet_points(image, aspect, image_visibility),
                     leftHand=hands[0], rightHand=hands[1],
-                    overlapActive=overlap_active, overlapManual=overlap_active, adaptiveFiltered=self.config.enabled, trackingStatus=self.status.copy(), observationStatus=observations, sampleTime=float(now))
+                    adaptiveFiltered=self.config.enabled, trackingStatus=self.status.copy(), observationStatus=observations, sampleTime=float(now))
         return self.last_packet
