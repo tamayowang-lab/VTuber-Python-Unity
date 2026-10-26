@@ -54,6 +54,11 @@ class BodyTracker:
     def reset_depth(self):
         self.depth.reset()
 
+    def cycle_overlap_mode(self):
+        modes = ('auto', 'force', 'off')
+        self.config.overlap_mode = modes[(modes.index(self.config.overlap_mode)+1) % len(modes)]
+        print('Hand overlap mode:', self.config.overlap_mode)
+
     def face_detector(self):
         return HolisticFaceAdapter(self)
 
@@ -86,7 +91,7 @@ class BodyTracker:
         mirrored_frame[:] = cv2.flip(canvas, 1)
         if self.config.debug:
             status = self.packet['trackingStatus']
-            cv2.putText(mirrored_frame, 'L: '+status['left']+'  R: '+status['right'],
+            cv2.putText(mirrored_frame, 'L: '+status['left']+'  R: '+status['right']+(' | OVERLAP approximation' if self.packet['overlapActive'] else ''),
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             pose = getattr(self.raw_result, 'pose_landmarks', None)
             confidences = 'no body wrists' if pose is None else 'body wrist vis L %.2f R %.2f' % (
@@ -198,6 +203,8 @@ def preview():
                 break
             if key == ord('c'):
                 tracker.reset_depth()
+            if key == ord('i'):
+                tracker.cycle_overlap_mode()
     finally:
         cap.release()
         if tracker:

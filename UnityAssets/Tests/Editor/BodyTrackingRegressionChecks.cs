@@ -269,6 +269,40 @@ public static class BodyTrackingRegressionChecks
                 parentFrame*Vector3.right, -35, 45);
             Quaternion expectedWristBend = parentFrame*Quaternion.AngleAxis(45, Vector3.right)*Quaternion.Inverse(parentFrame)*neutralWrist;
             Require(Quaternion.Angle(clamped, expectedWristBend) < 0.01f, "Wrist limit assumed fixed bone axes.");
+            // The overlap preset must hold first, blend from cached local pose,
+            // and return without a snap when real data resumes or the mode exits.
+            boneMap[HumanBodyBones.LeftIndexProximal] = bone;
+            BoneType.GetField("fingerCurlAxis").SetValue(bone, Vector3.right);
+            BoneType.GetField("filteredLocal").SetValue(bone, Quaternion.Euler(10, 0, 0));
+            BoneType.GetField("lastTracked").SetValue(bone, Time.time-5);
+            controller.returnToRestWhenLost = true;
+            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = true });
+            Call(controller, "UpdateOverlapPose", true, 0f);
+            Call(controller, "DriveFingers", true, null, false, 1f/60);
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.Euler(10, 0, 0)) < 0.01f,
+                "Overlap skipped the initial held pose.");
+            Set(controller, "overlapStarted", Time.time-1);
+            Call(controller, "UpdateOverlapPose", true, 0.3f);
+            for (int i = 0; i < 120; i++)
+            {
+                joint.localRotation = Quaternion.Euler(90, 0, 0); // Competing Animator pose.
+                Call(controller, "DriveFingers", true, null, false, 1f/60);
+            }
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.Euler(30, 0, 0)) < 0.1f,
+                "Overlap did not converge to the configured finger preset.");
+            Set(controller, "current", new HumanoidBodyController.Packet { overlapActive = false });
+            Call(controller, "UpdateOverlapPose", true, 0f);
+            Quaternion beforeRelease = joint.localRotation;
+            Call(controller, "DriveFingers", true, null, false, 1f/60);
+            Require(Quaternion.Angle(joint.localRotation, beforeRelease) < 0.1f,
+                "Leaving overlap snapped immediately to the fallback pose.");
+            for (int i = 0; i < 180; i++)
+            {
+                Call(controller, "UpdateOverlapPose", true, 1f/60);
+                Call(controller, "DriveFingers", true, null, false, 1f/60);
+            }
+            Require(Quaternion.Angle(joint.localRotation, Quaternion.identity) < 0.1f,
+                "Overlap release did not return smoothly to a fallback pose.");
             Debug.Log("PASS: cached rest transition, no-input ownership, parent-relative hold, spine-only torso, shoulder fallback.");
         }
         finally { UnityEngine.Object.DestroyImmediate(root); }

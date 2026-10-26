@@ -26,11 +26,12 @@ python -m unittest discover -s tests -v
 
 Copy the Python files AND the new `tracking/` directory to the laptop. Do not copy only `main.py`. Keep `body_depth.py`, `head_pose.py`, `facial_features.py`, `pose_estimator.py` and `model.txt` alongside it.
 
-In Unity, import the existing UnityChan package as before. Copy **all four current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
+In Unity, import the existing UnityChan package as before. Copy **all five current runtime scripts** from `UnityAssets/Scripts/UnityChan3D/`:
 
 - `HumanoidBodyController.cs`
 - **`ArmRetargeting.cs` (required solver)**
 - **`JointConstraints.cs` (required wrist-limit helper)**
+- **`HandPosePreset.cs` (required overlap-preset data class)**
 - `UnityChanController.cs`
 
 Replace matching scripts rather than adding duplicate classes. Keep the existing supporting UI/preferences/save scripts. No changes to the binary Unity packages or serialized scene are made automatically.
@@ -51,7 +52,7 @@ python body_tracking.py --video recorded-upper-body.mp4 --debug-tracking
 python body_tracking.py --video recorded-upper-body.mp4 --raw-tracking --debug-tracking
 ```
 
-`Q` quits. `C` recalibrates optional depth; in main.py it also resets head neutral. `G` in Unity's focused Game window recalibrates gaze. See [EYES.md](EYES.md) for the current eye controls.
+`Q` quits. `I` cycles automatic overlap, forced approximation, and off. `C` recalibrates optional depth; in main.py it also resets head neutral. `G` in Unity's focused Game window recalibrates gaze. See [EYES.md](EYES.md) for the current eye controls.
 
 ## Coordinates and mirroring
 
@@ -126,3 +127,17 @@ Current-instance evidence: blank-frame CPU inference, 33-pose-landmark person-im
 ## Wrist bend bounds
 
 Copy JointConstraints.cs into Assets alongside the existing controller/solver; do not attach this static helper as a component. Enable Limit Wrist Bend. Minimum Wrist Bend defaults to -40 degrees (extension) and Maximum Wrist Bend to +50 (flexion), relative to the captured neutral wrist. Try -25/+35 for tighter limits. The limit uses the neutral index-to-little palm axis expressed in the wrist parent's coordinates, not a hard-coded local X axis. Map the index/middle/little finger bases in the Humanoid Avatar; without a usable palm basis it skips the wrist bound rather than assuming an axis. Signed swing/twist decomposition leaves other wrist components available; this is a flexion/extension bound, not a forearm pronation or radial-deviation limit. It is enforced on the target, filtered pose, and held pose. Optional Unity Editor checks cover both signed bounds, twist preservation and rotated bind frames; they remain unrun here.
+
+## Interlaced-hands / overlap approximation
+
+This adds a cheap overlap mode, not a detector that can see hidden fingers. Show both hands separately first so temporal identities are established. Bring them together: body-wrist proximity relative to palm size starts an entry timer (0.12 seconds); a larger separation threshold and 0.2-second exit timer prevent flickering. A single duplicated hand cannot establish both identities. During overlap, candidate assignment stays one-to-one and uses body-wrist anchors/history. An unavailable hand may use its previously known palm shape translated to a still-visible body wrist, explicitly marked `overlap-held`. Finger data is withheld, not claimed as observed. If neither hand nor body wrists support the mode for 0.3 seconds, automatic overlap ends.
+
+In Unity, Enable Interlaced Hand Pose is on by default. Overlap Finger Hold Seconds = 0.15 keeps the last reliable finger pose briefly; Overlap Blend Seconds = 0.3 blends into the per-hand fallback preset and back toward tracking/rest on separation. Preset curls are proximal/intermediate/distal flexion in degrees, using finger axes calibrated from the model's neutral palm. Left/Right Interlaced Hand presets can be tuned separately in the Inspector; all angles remain subject to existing finger safety bounds. Missing finger mappings are skipped. Confident wrists/palm bases can continue to move while hidden finger shapes are held/preset. The cached local-pose filter prevents Animator writes from restarting the blend. A stale connection releases the mode through the same fallback transition.
+
+Copy the NEW HandPosePreset.cs into Assets beside JointConstraints.cs and ArmRetargeting.cs; none of these helpers is a component. Update HumanoidBodyController.cs plus the Python tracking/ directory, body_tracking.py, main.py together. Keep your tuned JSON values; older config files may omit the new overlap keys and receive their defaults, or merge the new keys from tracking.defaults.json. The optional wire `overlapActive` flag defaults to false for old senders. Existing JSON arrays and ports are unchanged.
+
+Python overlap_mode can be `auto` (default), `off`, or `force`. Press I in the focused Python preview to cycle auto -> force -> off; debug overlay explicitly says OVERLAP approximation. Force is a deliberate animation cue, useful when occlusion prevents automatic entry; it does not fabricate measured hands or identify unseen fingers. To disable all overlap approximation, choose off in Python and/or uncheck Enable Interlaced Hand Pose in Unity. Python off restores the normal independent-hand validation path. If auto triggers during high-fives or other close-hand gestures, use off or cue force only when intended; this is overlap geometry, not a trained interlacing gesture recognizer.
+
+The default per-hand curls are only a plausible hidden-finger fallback. They do NOT ensure that the avatar's hands physically meet, that fingers alternate exactly, or that meshes never intersect. Tune the two presets on the actual Unity-Chan rig. Hand contact still depends on arm proportions, IK wrist targets and elbow clearance. Do not remove joint safety limits to force an impossible pose. A fully authored interlaced pose or additional camera/hardware is needed for precise contact.
+
+Python regression tests cover entry/exit hysteresis, single-hand duplicate rejection, visible body-wrist support during hand loss, separation recovery, swapped labels and explicit force/off modes. Optional Unity checks cover initial holding, preset convergence despite Animator writes, and no-snap recovery; these Unity runtime checks remain unrun here.

@@ -202,6 +202,6 @@ python -m unittest discover -s tests -v
 ```
 
 When updating Unity, copy `HumanoidBodyController.cs`, **the new `ArmRetargeting.cs`**,
-`JointConstraints.cs`, and `UnityChanController.cs` from `UnityAssets/Scripts/UnityChan3D/` into the existing
+`JointConstraints.cs`, `HandPosePreset.cs`, and `UnityChanController.cs` from `UnityAssets/Scripts/UnityChan3D/` into the existing
 project, replacing matching scripts. Copy the new Python `tracking/` directory too.
 The supplied binary Unity packages have not been rebuilt and do not contain these updates.

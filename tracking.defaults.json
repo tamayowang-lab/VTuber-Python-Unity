@@ -10,5 +10,11 @@
   "identity_memory": 0.5,
   "max_image_speed": 4.0,
   "max_world_speed": 8.0,
-  "debug": false
+  "debug": false,
+  "overlap_mode": "auto",
+  "overlap_enter_ratio": 1.8,
+  "overlap_exit_ratio": 2.5,
+  "overlap_enter_seconds": 0.12,
+  "overlap_exit_seconds": 0.2,
+  "overlap_lost_seconds": 0.3
 }

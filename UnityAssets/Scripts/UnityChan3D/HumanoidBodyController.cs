@@ -28,6 +28,14 @@ public class HumanoidBodyController : MonoBehaviour
     [Tooltip("Require a detailed hand detection before driving that arm; avoids inferred wrist jitter.")]
     public bool requireHandForArmTracking = false;
     public bool inferArmFromHand = true;
+    [Header("Overlapping / interlaced hands (approximation)")]
+    public bool enableInterlacedHandPose = true;
+    [Min(0)] public float overlapFingerHoldSeconds = 0.15f;
+    [Min(0.01f)] public float overlapBlendSeconds = 0.3f;
+    public HandPosePreset leftInterlacedHand = new HandPosePreset();
+    public HandPosePreset rightInterlacedHand = new HandPosePreset();
+    [SerializeField] bool overlapPoseActive;
+    [Header("Wrist bend")]
     public bool limitWristBend = true;
     [Tooltip("Extension from neutral, in degrees. This does not limit forearm twist.")]
     [Range(-90, 0)] public float minimumWristBend = -40f;
@@ -63,6 +71,7 @@ public class HumanoidBodyController : MonoBehaviour
     {
         public int version;
         public Point[] pose, leftHand, rightHand, imagePose;
+        public bool overlapActive;
         public bool adaptiveFiltered;
         public bool depthValid;
         public float depthOffset;
@@ -72,7 +81,8 @@ public class HumanoidBodyController : MonoBehaviour
         public Transform transform;
         public Quaternion restLocal, neutralLocal, restRotation, filteredLocal, avatarToParent;
         public bool ownsPose, finger;
-        public Vector3 restDirection, wristBendAxis;
+        public Vector3 restDirection, wristBendAxis, fingerCurlAxis;
+        public Quaternion overlapHeldLocal, overlapReleaseLocal;
         public float lastTracked = float.NegativeInfinity;
     }
 
@@ -94,6 +104,7 @@ public class HumanoidBodyController : MonoBehaviour
     Packet pending;
     Packet current;
     bool trackingActive;
+    float overlapStarted, overlapWeight, overlapReleaseWeight;
     string networkError;
     float lastPacket = float.NegativeInfinity;
     Quaternion restTorsoFrame;
@@ -108,6 +119,7 @@ public class HumanoidBodyController : MonoBehaviour
 
     void Start()
     {
+        overlapPoseActive = false;
         animator = GetComponent<Animator>();
         if (animator == null || !animator.isHuman)
         {
@@ -246,7 +258,16 @@ public class HumanoidBodyController : MonoBehaviour
         foreach (HumanBodyBones id in fingers)
         {
             Bone finger;
-            if (bones.TryGetValue(id, out finger)) finger.finger = true;
+            if (bones.TryGetValue(id, out finger))
+            {
+                finger.finger = true;
+                Quaternion palm;
+                if (restPalmFrames.TryGetValue(left, out palm))
+                {
+                    Vector3 axis = Vector3.Cross(finger.restDirection, palm*Vector3.forward);
+                    if (axis.sqrMagnitude > 1e-8f) finger.fingerCurlAxis = (finger.avatarToParent*axis.normalized).normalized;
+                }
+            }
         }
     }
 
@@ -281,8 +302,8 @@ public class HumanoidBodyController : MonoBehaviour
         foreach (HumanBodyBones id in new[] { HumanBodyBones.LeftUpperArm, HumanBodyBones.LeftLowerArm,
             HumanBodyBones.LeftHand, HumanBodyBones.RightUpperArm, HumanBodyBones.RightLowerArm, HumanBodyBones.RightHand })
             ResetBone(id);
-        foreach (HumanBodyBones id in LeftFingers) ResetBone(id);
-        foreach (HumanBodyBones id in RightFingers) ResetBone(id);
+        DriveFingers(true, null, false, Time.deltaTime);
+        DriveFingers(false, null, false, Time.deltaTime);
     }
 
     void Receive()
@@ -488,6 +509,7 @@ public class HumanoidBodyController : MonoBehaviour
         }
         bool live = current != null && Time.time - lastPacket <= trackingTimeout;
         ApplyDepthMotion(live, Time.deltaTime);
+        UpdateOverlapPose(live, Time.deltaTime);
         // With no input, leave the torso alone. Optionally own only the arms
         // to maintain the requested relaxed rest pose from our cached filter.
         if (!live)
@@ -498,6 +520,11 @@ public class HumanoidBodyController : MonoBehaviour
             torsoTracking = false;
             foreach (Bone bone in bones.Values) bone.ownsPose = false;
             if (useRelaxedArmRestPose) RelaxIdleArms();
+            else if (overlapWeight > 0)
+            {
+                DriveFingers(true, null, false, Time.deltaTime);
+                DriveFingers(false, null, false, Time.deltaTime);
+            }
             return;
         }
         if (!trackingActive)
@@ -527,7 +554,6 @@ public class HumanoidBodyController : MonoBehaviour
         HumanBodyBones upper = left ? HumanBodyBones.LeftUpperArm : HumanBodyBones.RightUpperArm;
         HumanBodyBones lower = left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm;
         HumanBodyBones palm = left ? HumanBodyBones.LeftHand : HumanBodyBones.RightHand;
-        HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
         debugValid[left ? 0 : 1] = false;
         bool handPresent = hand != null && hand.Length == 21 && hand[0].visibility >= minimumVisibility;
         bool armReliable = (!requireHandForArmTracking || handPresent)
@@ -542,16 +568,16 @@ public class HumanoidBodyController : MonoBehaviour
         {
             HoldOrResetBone(upper);
             HoldOrResetBone(lower);
-            HoldOrResetBone(palm);
-            foreach (HumanBodyBones id in fingers) HoldOrResetBone(id);
+            if (!HoldOverlapPalm(palm)) HoldOrResetBone(palm);
+            DriveFingers(left, null, false, Time.deltaTime);
             return;
         }
         if (!handPresent)
         {
             // A neutral local wrist follows the reliable forearm naturally.
             // Open the fingers instead of freezing a previous grip.
-            ResetBone(palm);
-            foreach (HumanBodyBones id in fingers) ResetBone(id);
+            if (!HoldOverlapPalm(palm)) ResetBone(palm);
+            DriveFingers(left, null, false, Time.deltaTime);
             return;
         }
         Vector3 palmRight = TrackingPosition(hand[5]) - TrackingPosition(hand[17]);
@@ -564,17 +590,81 @@ public class HumanoidBodyController : MonoBehaviour
             && Vector3.Cross(palmRight, palmUp).sqrMagnitude > 1e-10f;
         if (palmReliable && bones.TryGetValue(palm, out palmBone) && restPalmFrames.TryGetValue(left, out restFrame))
             Rotate(palmBone, Frame(palmRight, palmUp) * Quaternion.Inverse(restFrame) * palmBone.restRotation);
-        else ResetBone(palm);
-        float palmSize = Mathf.Max(palmRight.magnitude, palmUp.magnitude);
+        else if (!HoldOverlapPalm(palm)) ResetBone(palm);
+        DriveFingers(left, hand, palmReliable, Time.deltaTime);
+    }
+
+    bool HoldOverlapPalm(HumanBodyBones id)
+    {
+        Bone bone;
+        if (!overlapPoseActive || !bones.TryGetValue(id, out bone)) return false;
+        // Deliberately held orientation, not a measurement; continue to obey
+        // wrist bounds and let the held hand follow the moving forearm.
+        bone.filteredLocal = ConstrainLocal(bone, bone.filteredLocal);
+        bone.transform.localRotation = bone.filteredLocal;
+        bone.ownsPose = true;
+        return true;
+    }
+
+    void UpdateOverlapPose(bool live, float deltaTime)
+    {
+        bool requested = enableInterlacedHandPose && live && current.overlapActive;
+        if (requested && !overlapPoseActive)
+        {
+            overlapStarted = Time.time;
+            foreach (Bone bone in bones.Values)
+                if (bone.finger) bone.overlapHeldLocal = bone.ownsPose ? bone.filteredLocal : bone.transform.localRotation;
+        }
+        else if (!requested && overlapPoseActive)
+        {
+            overlapReleaseWeight = Mathf.Max(overlapWeight, 1e-5f);
+            foreach (Bone bone in bones.Values)
+                if (bone.finger) bone.overlapReleaseLocal = bone.filteredLocal;
+        }
+        overlapPoseActive = requested;
+        float target = requested && Time.time-overlapStarted >= overlapFingerHoldSeconds ? 1 : 0;
+        overlapWeight = Mathf.MoveTowards(overlapWeight, target, deltaTime/Mathf.Max(0.01f, overlapBlendSeconds));
+    }
+
+    void DriveFingers(bool left, Point[] hand, bool palmReliable, float deltaTime)
+    {
+        HumanBodyBones[] fingers = left ? LeftFingers : RightFingers;
+        HandPosePreset preset = left ? leftInterlacedHand : rightInterlacedHand;
+        float palmSize = hand == null ? 0 : Mathf.Max(
+            (TrackingPosition(hand[5])-TrackingPosition(hand[17])).magnitude,
+            (TrackingPosition(hand[9])-TrackingPosition(hand[0])).magnitude);
         for (int finger = 0; finger < 5; finger++)
         {
-            bool reliable = palmReliable && FingerReliable(hand, finger, palmSize);
+            bool measured = !overlapPoseActive && hand != null && palmReliable && FingerReliable(hand, finger, palmSize);
             for (int segment = 0; segment < 3; segment++)
             {
-                HumanBodyBones id = fingers[finger * 3 + segment];
-                int start = 1 + finger * 4 + segment;
-                if (reliable) Aim(id, TrackingPosition(hand[start + 1]) - TrackingPosition(hand[start]));
-                else ResetBone(id);
+                Bone bone;
+                if (!bones.TryGetValue(fingers[finger*3+segment], out bone)) continue;
+                Quaternion target;
+                if (overlapPoseActive)
+                {
+                    Quaternion approximate = bone.overlapHeldLocal;
+                    if (preset != null && bone.fingerCurlAxis.sqrMagnitude > 1e-8f)
+                        approximate = Quaternion.AngleAxis(preset.Curl(finger, segment), bone.fingerCurlAxis)*bone.restLocal;
+                    target = Quaternion.Slerp(bone.overlapHeldLocal, approximate, overlapWeight);
+                }
+                else
+                {
+                    target = !returnToRestWhenLost || Time.time-bone.lastTracked <= occlusionGracePeriod
+                        ? bone.filteredLocal : bone.restLocal;
+                    if (measured)
+                    {
+                        int start = 1+finger*4+segment;
+                        Vector3 direction = TrackingPosition(hand[start+1])-TrackingPosition(hand[start]);
+                        Quaternion rootTarget = Quaternion.FromToRotation(bone.restDirection, direction)*bone.restRotation;
+                        target = Quaternion.Inverse(bone.transform.parent.rotation)*transform.rotation*rootTarget;
+                        bone.lastTracked = Time.time;
+                    }
+                    if (overlapWeight > 0)
+                        target = Quaternion.Slerp(target, bone.overlapReleaseLocal,
+                            Mathf.Clamp01(overlapWeight/Mathf.Max(overlapReleaseWeight, 1e-5f)));
+                }
+                ApplyLocal(bone, target, deltaTime, measured && overlapWeight <= 0);
             }
         }
     }
